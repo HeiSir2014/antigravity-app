@@ -1,0 +1,24 @@
+{
+  "name": "antigravity-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Google Antigravity Dual-Engine App (Gemini Web Home + Antigravity Code Remote) with Claude Code Remote Bottom Sheets",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:inject": "bun build src/inject/agy-bridge.ts --format=iife --target=browser --outfile=src/generated/agy-bridge.iife.js && bun build src/inject/gemini-bridge.ts --format=iife --target=browser --outfile=src/generated/gemini-bridge.iife.js && cp src/generated/agy-bridge.iife.js src/generated/gemini-bridge.iife.js src-tauri/gen/android/app/src/main/assets/",
+    "build": "bun run build:inject && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "ws": "^8.23.0"
+  }
+}

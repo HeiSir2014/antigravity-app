@@ -1,0 +1,182 @@
+/* Modern Web Guidance: dark-mode, form-factor-adaptation, natural-interactions */
+:root {
+  --brand-light: #1a73e8;
+  --brand-dark: #7cacf8;
+  --bg-light: #f8fafc;
+  --bg-dark: #0b0d12;
+  --card-light: #ffffff;
+  --card-dark: #13161f;
+  --text-light: #0f172a;
+  --text-dark: #f1f5f9;
+  --muted-light: #475569;
+  --muted-dark: #94a3b8;
+  --border-light: rgb(15 23 42 / 0.12);
+  --border-dark: rgb(241 245 249 / 0.12);
+
+  --color-brand: var(--brand-light);
+  --color-bg: var(--bg-light);
+  --color-card: var(--card-light);
+  --color-text: var(--text-light);
+  --color-muted: var(--muted-light);
+  --color-border: var(--border-light);
+  --target-size: 24px;
+
+  @media (prefers-color-scheme: dark) {
+    --color-brand: var(--brand-dark);
+    --color-bg: var(--bg-dark);
+    --color-card: var(--card-dark);
+    --color-text: var(--text-dark);
+    --color-muted: var(--muted-dark);
+    --color-border: var(--border-dark);
+  }
+
+  @supports (color: light-dark(white, black)) {
+    --color-brand: light-dark(var(--brand-light), var(--brand-dark));
+    --color-bg: light-dark(var(--bg-light), var(--bg-dark));
+    --color-card: light-dark(var(--card-light), var(--card-dark));
+    --color-text: light-dark(var(--text-light), var(--text-dark));
+    --color-muted: light-dark(var(--muted-light), var(--muted-dark));
+    --color-border: light-dark(var(--border-light), var(--border-dark));
+  }
+
+  color-scheme: light dark;
+  accent-color: var(--color-brand);
+}
+
+@media (pointer: coarse) {
+  :root {
+    --target-size: 44px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+h1, h2, h3 {
+  text-wrap: balance;
+  margin-top: 0;
+}
+
+p, li {
+  text-wrap: pretty;
+  line-height: 1.6;
+  color: var(--color-muted);
+}
+
+.hub-container {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 20px 16px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.hero-card,
+.sheets-preview-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  padding: 22px;
+}
+
+.hero-brand-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.hero-logo-img {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  filter: drop-shadow(0 2px 8px rgba(49, 134, 255, 0.25));
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  background: rgb(26 115 232 / 0.14);
+  color: var(--color-brand);
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.primary-launch-btn,
+.accent-launch-btn,
+.sheet-card-btn {
+  min-block-size: var(--target-size);
+  min-inline-size: var(--target-size);
+  padding: 12px 16px;
+  border-radius: 14px;
+  font-size: 0.95rem;
+  font-weight: 650;
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  transition: box-shadow 150ms ease-out, scale 150ms ease-out;
+}
+
+.primary-launch-btn {
+  background: var(--color-brand);
+  color: #081226;
+  border-color: transparent;
+}
+
+.accent-launch-btn {
+  background: var(--color-card);
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.sheet-card-btn {
+  background: var(--color-bg);
+  color: var(--color-text);
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:where(button, a):hover {
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+}
+
+:where(button):active {
+  scale: 0.97;
+}
+
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid CanvasText;
+  outline-offset: 3px;
+}

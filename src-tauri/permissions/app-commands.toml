@@ -1,0 +1,10 @@
+[[permission]]
+identifier = "allow-app-commands"
+description = "Enables all app commands for the frontend"
+commands.allow = [
+  "sync_unified_state",
+  "get_unified_state",
+  "navigate_to_remote_session",
+  "import_google_cookies",
+  "agy_bridge_message"
+]
