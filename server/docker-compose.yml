@@ -1,0 +1,21 @@
+services:
+  antigravity-sync:
+    build: .
+    container_name: antigravity-sync-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8787}:8787"
+    environment:
+      PORT: "8787"
+      DATABASE_PATH: "/app/data/sync.db"
+      JWT_SECRET: "${JWT_SECRET:-replace-with-strong-32byte-jwt-secret}"
+      VAULT_MASTER_KEY: "${VAULT_MASTER_KEY:-replace-with-strong-32byte-vault-key}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://sync.antigravity.app}"
+      ALLOW_DEV_SSO: "${ALLOW_DEV_SSO:-false}"
+    volumes:
+      - sync-data:/app/data
+
+volumes:
+  sync-data:

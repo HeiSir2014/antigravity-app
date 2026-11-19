@@ -40,10 +40,18 @@ android {
         }
         getByName("release") {
             signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
             optimization {
                enable = true
             }
+            packaging {
+                jniLibs {
+                    useLegacyPackaging = false
+                }
+            }
             proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
                 *fileTree(".") {
                   include("**/*.pro")
                   exclude("build/**")

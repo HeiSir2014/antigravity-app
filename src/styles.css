@@ -1,182 +1,237 @@
-/* Modern Web Guidance: dark-mode, form-factor-adaptation, natural-interactions */
+@import "tailwindcss";
+
 :root {
-  --brand-light: #1a73e8;
-  --brand-dark: #7cacf8;
-  --bg-light: #f8fafc;
-  --bg-dark: #0b0d12;
-  --card-light: #ffffff;
-  --card-dark: #13161f;
-  --text-light: #0f172a;
-  --text-dark: #f1f5f9;
-  --muted-light: #475569;
-  --muted-dark: #94a3b8;
-  --border-light: rgb(15 23 42 / 0.12);
-  --border-dark: rgb(241 245 249 / 0.12);
-
-  --color-brand: var(--brand-light);
-  --color-bg: var(--bg-light);
-  --color-card: var(--card-light);
-  --color-text: var(--text-light);
-  --color-muted: var(--muted-light);
-  --color-border: var(--border-light);
-  --target-size: 24px;
-
-  @media (prefers-color-scheme: dark) {
-    --color-brand: var(--brand-dark);
-    --color-bg: var(--bg-dark);
-    --color-card: var(--card-dark);
-    --color-text: var(--text-dark);
-    --color-muted: var(--muted-dark);
-    --color-border: var(--border-dark);
-  }
-
-  @supports (color: light-dark(white, black)) {
-    --color-brand: light-dark(var(--brand-light), var(--brand-dark));
-    --color-bg: light-dark(var(--bg-light), var(--bg-dark));
-    --color-card: light-dark(var(--card-light), var(--card-dark));
-    --color-text: light-dark(var(--text-light), var(--text-dark));
-    --color-muted: light-dark(var(--muted-light), var(--muted-dark));
-    --color-border: light-dark(var(--border-light), var(--border-dark));
-  }
-
   color-scheme: light dark;
-  accent-color: var(--color-brand);
+  /* Claude App Mobile warm alabaster (light) & warm obsidian (dark) palette */
+  --bg-canvas: light-dark(#faf9f5, #181817);
+  --bg-surface: light-dark(#ffffff, #212120);
+  --bg-elevated: light-dark(#f2f0e9, #2a2a28);
+  --bg-subtle: light-dark(#e9e6dc, #333330);
+  --border-subtle: light-dark(rgba(20, 20, 19, 0.08), rgba(255, 255, 255, 0.08));
+  --border-strong: light-dark(rgba(20, 20, 19, 0.15), rgba(255, 255, 255, 0.15));
+  --text-primary: light-dark(#141413, #f4f3ee);
+  --text-secondary: light-dark(#5e5c56, #a8a69e);
+  --text-muted: light-dark(#8c8980, #78766e);
+  --accent: light-dark(#c96442, #c45d3b);
+  --accent-soft: light-dark(rgba(201, 100, 66, 0.11), rgba(196, 93, 59, 0.2));
+  --blue: light-dark(#2563eb, #60a5fa);
+  --green: light-dark(#15803d, #4ade80);
+  --amber: light-dark(#b45309, #fbbf24);
+  --red: light-dark(#dc2626, #f87171);
+  --agy-font-scale: 1;
 }
 
-@media (pointer: coarse) {
-  :root {
-    --target-size: 44px;
-  }
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root[data-font='compact'] {
+  --agy-font-scale: 0.92;
+}
+
+:root[data-font='default'] {
+  --agy-font-scale: 1;
+}
+
+:root[data-font='large'] {
+  --agy-font-scale: 1.09;
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
-body {
+button:focus {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
   margin: 0;
-  background: var(--color-bg);
-  color: var(--color-text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  overflow-wrap: anywhere;
+  padding: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', Roboto, Inter, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  touch-action: manipulation;
 }
 
-h1, h2, h3 {
-  text-wrap: balance;
-  margin-top: 0;
+@keyframes agySheetSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-p, li {
-  text-wrap: pretty;
-  line-height: 1.6;
-  color: var(--color-muted);
+@keyframes agyDrawerSlideIn {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
 }
 
-.hub-container {
-  max-width: 54rem;
-  margin: 0 auto;
-  padding: 20px 16px 80px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+.agy-drawer-panel {
+  animation: agyDrawerSlideIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.hero-card,
-.sheets-preview-card {
-  background: var(--color-card);
-  border: 1px solid var(--color-border);
-  border-radius: 20px;
-  padding: 22px;
+/* Native <dialog> bottom sheet with smooth spring entry */
+dialog.agy-sheet {
+  margin: auto 0 0 0;
+  padding: 0;
+  width: 100%;
+  max-width: 100%;
+  max-height: 90dvh;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 22px 22px 0 0;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 -14px 44px rgba(0, 0, 0, 0.28);
+  overscroll-behavior: contain;
+  overflow: hidden;
 }
 
-.hero-brand-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 14px;
+dialog.agy-sheet[open] {
+  animation: agySheetSlideUp 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.hero-logo-img {
-  width: 52px;
-  height: 52px;
-  flex-shrink: 0;
-  border-radius: 12px;
-  filter: drop-shadow(0 2px 8px rgba(49, 134, 255, 0.25));
+@media (min-width: 768px) {
+  dialog.agy-sheet {
+    margin: auto;
+    max-width: 600px;
+    border-radius: 22px;
+    border: 1px solid var(--border-subtle);
+  }
 }
 
-.badge-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+dialog.agy-sheet::backdrop {
+  background: rgba(0, 0, 0, 0.46);
+  backdrop-filter: blur(4px);
 }
 
-.status-pill {
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 0.78rem;
+/* Editorial Markdown typography inside Assistant messages */
+.agy-md {
+  font-size: calc(0.95rem * var(--agy-font-scale));
+  line-height: 1.66;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.agy-md p {
+  margin: 0 0 0.75rem 0;
+}
+.agy-md p:last-child {
+  margin-bottom: 0;
+}
+
+.agy-md h1,
+.agy-md h2,
+.agy-md h3 {
   font-weight: 650;
-  background: rgb(26 115 232 / 0.14);
-  color: var(--color-brand);
+  margin: 1rem 0 0.5rem 0;
+  line-height: 1.32;
+}
+.agy-md h1 { font-size: calc(1.15rem * var(--agy-font-scale)); }
+.agy-md h2 { font-size: calc(1.05rem * var(--agy-font-scale)); }
+.agy-md h3 { font-size: calc(0.98rem * var(--agy-font-scale)); }
+
+.agy-md ul {
+  list-style-type: disc;
+  margin: 0.35rem 0 0.75rem 0;
+  padding-left: 1.35rem;
+}
+.agy-md ol {
+  list-style-type: decimal;
+  margin: 0.35rem 0 0.75rem 0;
+  padding-left: 1.35rem;
+}
+.agy-md li {
+  margin: 0.28rem 0;
 }
 
-.action-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 12px;
-  margin-top: 16px;
+.agy-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.84em;
+  padding: 0.12rem 0.38rem;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
 }
 
-.primary-launch-btn,
-.accent-launch-btn,
-.sheet-card-btn {
-  min-block-size: var(--target-size);
-  min-inline-size: var(--target-size);
-  padding: 12px 16px;
+.agy-md pre {
+  margin: 0.65rem 0;
+  padding: 0.8rem 0.9rem;
   border-radius: 14px;
-  font-size: 0.95rem;
-  font-weight: 650;
-  cursor: pointer;
-  border: 1px solid var(--color-border);
-  transition: box-shadow 150ms ease-out, scale 150ms ease-out;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
-.primary-launch-btn {
-  background: var(--color-brand);
-  color: #081226;
-  border-color: transparent;
+.agy-md pre code {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 0.8125rem;
+  line-height: 1.52;
 }
 
-.accent-launch-btn {
-  background: var(--color-card);
-  color: var(--color-brand);
-  border-color: var(--color-brand);
+.agy-md blockquote {
+  margin: 0.6rem 0;
+  padding: 0.2rem 0 0.2rem 0.85rem;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
 }
 
-.sheet-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-  gap: 10px;
-  margin-top: 12px;
+.agy-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.65rem 0;
+  font-size: 0.84rem;
+  display: block;
+  overflow-x: auto;
 }
 
-.sheet-card-btn {
-  background: var(--color-bg);
-  color: var(--color-text);
+.agy-md th,
+.agy-md td {
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border-subtle);
   text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
-:where(button, a):hover {
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+.agy-md th {
+  background: var(--bg-elevated);
+  font-weight: 600;
 }
 
-:where(button):active {
-  scale: 0.97;
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
-:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
-  outline: 2px solid CanvasText;
-  outline-offset: 3px;
+.scroll-fade-right {
+  mask-image: linear-gradient(to right, black 0%, black 88%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 0%, black 88%, transparent 100%);
 }

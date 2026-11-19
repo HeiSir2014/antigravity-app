@@ -1,17 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for Antigravity Dual-Engine App",
+  "description": "Default capabilities for Antigravity Pure-Native App",
   "local": true,
-  "windows": ["*"],
-  "remote": {
-    "urls": [
-      "https://antigravity.google.com/*",
-      "https://gemini.google.com/*",
-      "https://*.google.com/*",
-      "https://antigravity.static.usercontent.goog/*"
-    ]
-  },
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",

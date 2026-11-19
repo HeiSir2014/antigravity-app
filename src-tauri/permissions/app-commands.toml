@@ -1,10 +1,36 @@
 [[permission]]
 identifier = "allow-app-commands"
-description = "Enables all app commands for the frontend"
+description = "Enables all Antigravity multi-account native protocol commands for the frontend"
 commands.allow = [
-  "sync_unified_state",
-  "get_unified_state",
-  "navigate_to_remote_session",
-  "import_google_cookies",
-  "agy_bridge_message"
+  "list_accounts",
+  "import_account_cookies",
+  "toggle_account",
+  "remove_account",
+  "export_vault_json",
+  "import_vault_json",
+  "sync_get_status",
+  "sync_set_server_url",
+  "sync_login_google_id_token",
+  "sync_login_dev_sso",
+  "sync_start_google_oauth",
+  "sync_complete_oauth_callback",
+  "sync_logout",
+  "sync_push_vault",
+  "sync_pull_vault",
+  "check_app_update",
+  "download_app_update",
+  "open_google_login",
+  "harvest_login_cookies",
+  "list_instances",
+  "list_all_sessions",
+  "get_trajectory_steps",
+  "start_cascade",
+  "send_user_message",
+  "handle_user_interaction",
+  "cancel_invocation",
+  "get_model_configs",
+  "get_user_status",
+  "stream_agent_state",
+  "stop_agent_stream",
+  "proxy_raw_rpc"
 ]

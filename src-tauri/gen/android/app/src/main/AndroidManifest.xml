@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -28,14 +29,20 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
-            <!-- Deep Link / App Links for Antigravity Remote & Gemini Web -->
+            <!-- Deep Link / App Links for Antigravity Remote & OAuth SSO Callback -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="antigravity.google.com" android:pathPrefix="/remote" />
                 <data android:scheme="https" android:host="antigravity.google.com" android:pathPrefix="/r" />
-                <data android:scheme="https" android:host="gemini.google.com" android:pathPrefix="/app" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="antigravity" android:host="auth" android:pathPrefix="/callback" />
             </intent-filter>
         </activity>
 

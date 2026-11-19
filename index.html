@@ -2,51 +2,18 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <!-- MANDATORY per modern-web-guidance dark-mode: prevent FOUC -->
     <meta name="color-scheme" content="light dark" />
-    <!-- MANDATORY per modern-web-guidance form-factor-adaptation: safe-area & soft-keyboard resize -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
-    <title>Antigravity — Gemini Chat &amp; Antigravity Code Remote</title>
+    <title>Antigravity</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="alternate icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <main class="hub-container" id="app-root">
-      <section class="hero-card">
-        <div class="hero-brand-header">
-          <img src="/favicon.svg" alt="Google Antigravity Logo" class="hero-logo-img" width="56" height="56" />
-          <div class="badge-row">
-            <span class="status-pill">● Shared .google.com SSO</span>
-            <span class="status-pill">⚡ Claude CCR Architecture</span>
-          </div>
-        </div>
-        <h1>Google Antigravity Dual-Engine App</h1>
-        <p>
-          主页无缝接入 <strong>Gemini Web (Chat)</strong>，编程专页深度集成
-          <strong>Antigravity Remote (Code)</strong>，共享 Google 官方账号与订阅，内置复刻自
-          Claude Android 的 9 大核心底部抽屉与锁屏通知栏行内批复。
-        </p>
-        <div class="action-grid">
-          <button type="button" class="primary-launch-btn" id="btn-launch-gemini">
-            ✨ 进入 Gemini Web (Home)
-          </button>
-          <button type="button" class="accent-launch-btn" id="btn-launch-agy">
-            ⚡ 进入 Antigravity Remote (Code)
-          </button>
-        </div>
-      </section>
-
-      <section class="sheets-preview-card" aria-labelledby="sheets-heading">
-        <h2 id="sheets-heading">Claude Code Remote 9 大核心抽屉预览与联调</h2>
-        <p>点击任一模块立即唤起原生顶层 <code>&lt;dialog&gt;</code> Bottom Sheet：</p>
-        <div class="sheet-grid" id="sheet-launcher-grid"></div>
-      </section>
-    </main>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
