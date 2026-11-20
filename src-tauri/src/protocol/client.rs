@@ -14,8 +14,8 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 
 const LIST_INSTANCES_URL: &str =
@@ -130,6 +130,7 @@ pub struct AntigravityClient {
     http: reqwest::Client,
     auth: Arc<AuthStore>,
     cached_api_key: RwLock<Option<String>>,
+    trajectory_cache: Mutex<HashMap<String, (Instant, Value)>>,
 }
 
 /// `GetCascadeModelConfigs` is empty on a workspace-runner LS; the current
@@ -241,6 +242,7 @@ impl AntigravityClient {
             http,
             auth,
             cached_api_key: RwLock::new(env_key),
+            trajectory_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1157,16 +1159,40 @@ impl AntigravityClient {
         cascade_id: &str,
         step_offset: u32,
     ) -> Result<Value, String> {
-        self.proxy_unary_json(
-            account_id,
-            device_uuid,
-            "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectorySteps",
-            json!({
-                "cascadeId": cascade_id,
-                "stepOffset": step_offset
-            }),
-        )
-        .await
+        let cache_key = format!("{account_id}|{device_uuid}|{cascade_id}|{step_offset}");
+        if let Ok(cache) = self.trajectory_cache.lock() {
+            if let Some((at, value)) = cache.get(&cache_key) {
+                if at.elapsed() < Duration::from_secs(3) {
+                    return Ok(value.clone());
+                }
+            }
+        }
+
+        let value = self
+            .proxy_unary_json(
+                account_id,
+                device_uuid,
+                "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectorySteps",
+                json!({
+                    "cascadeId": cascade_id,
+                    "stepOffset": step_offset
+                }),
+            )
+            .await?;
+
+        if let Ok(mut cache) = self.trajectory_cache.lock() {
+            if cache.len() >= 80 {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(key, _)| key.clone())
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(cache_key, (Instant::now(), value.clone()));
+        }
+        Ok(value)
     }
 
     pub async fn start_cascade(

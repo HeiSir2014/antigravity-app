@@ -88,8 +88,10 @@ jobs:
 
             ### Highlights
             - **Pure-Native Tauri v2 + Rust Engine**: Zero WebView DOM injection — speaks Google Antigravity's native `application/json+protobuf` (`boq-jetski` + `LanguageServerService`) protocol directly in Rust.
-            - **Multi-Account × Multi-Device Concurrent Aggregation**: View all remote workstations and live coding sessions in one unified feed (`Unified` / `By Account` / `By Device`).
-            - **Adaptive Claude Mobile & Desktop UX**: Persistent `280px` split-pane sidebar on Desktop (`>= 1024px`); touch-ergonomic swipe drawer, bottom sheets, edge-to-edge safe-area & IME insets on Android.
+            - **Multi-Account × Multi-Device Concurrent Aggregation**: One searchable session feed with an account/device filter panel; desktop sidebar stays open when switching sessions.
+            - **Adaptive Claude Mobile & Desktop UX**: Persistent desktop sidebar, full-page Settings, bottom-sheet mobile settings, edge-to-edge safe-area & IME-aware composer.
+            - **Claude-Style Command Palette & Composer**: `⌘K` / `Ctrl+K` command palette for sessions, Usage, Settings and New Session; slash suggestions only appear after typing `/`; attachments and permissions live behind the composer `+` menu.
+            - **Instant Session Switching**: memory + localStorage trajectory cache, cold-start session snapshot, stale-response/stream guards, 350ms stream refresh debounce, and a Rust trajectory LRU cache.
             - **Cookie Self-Heal + Cloud Vault Sync**: `ListInstances` 401 automatically re-imports the live WebKit cookie store, retries, and syncs the repaired vault to the Cloud Vault (AES-256-GCM at rest, TLS in transit) within 30 seconds.
             - **Live Model & Slash Commands**: Falls back to `GetAvailableModels` when a workspace-runner LS returns an empty model catalog, and sends the resolved default model to `GetSlashCommands`.
             - **Android Notification Approval**: Approve / Deny / Deny-with-comment actions now cross the native bridge and resolve the pending interaction, with a WebKit-cookie login fallback.

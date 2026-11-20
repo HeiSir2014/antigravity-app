@@ -79,6 +79,72 @@ import type {
   UnifiedSessionSummary,
 } from './types/agent';
 
+const SESSION_SNAPSHOT_KEY = 'agy.sessionSnapshot.v1';
+const SESSION_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface CachedSessionSnapshot {
+  savedAtMs: number;
+  accounts: AccountSummary[];
+  devices: DeviceInstance[];
+  sessions: UnifiedSessionSummary[];
+  activeSessionId?: string;
+}
+
+function readCachedSessionSnapshot(): CachedSessionSnapshot | null {
+  try {
+    const raw = localStorage.getItem(SESSION_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CachedSessionSnapshot>;
+    if (
+      !parsed ||
+      typeof parsed.savedAtMs !== 'number' ||
+      Date.now() - parsed.savedAtMs > SESSION_SNAPSHOT_TTL_MS ||
+      !Array.isArray(parsed.accounts) ||
+      !Array.isArray(parsed.devices) ||
+      !Array.isArray(parsed.sessions)
+    ) {
+      return null;
+    }
+    return {
+      savedAtMs: parsed.savedAtMs,
+      accounts: parsed.accounts,
+      devices: parsed.devices,
+      sessions: parsed.sessions.slice(0, 200),
+      activeSessionId:
+        typeof parsed.activeSessionId === 'string' ? parsed.activeSessionId : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const MAX_MEMORY_TRAJECTORY_CACHE = 40;
+const MAX_PERSISTED_TRAJECTORY_CACHE = 30;
+
+function cacheTrajectory(
+  cache: Map<string, unknown[]>,
+  key: string,
+  steps: unknown[]
+): void {
+  cache.set(key, steps);
+  while (cache.size > MAX_MEMORY_TRAJECTORY_CACHE) {
+    const oldest = cache.keys().next().value;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
+
+function prunePersistedTrajectoryCache(): void {
+  try {
+    const keys = Object.keys(localStorage).filter((key) => key.startsWith('agy.steps.'));
+    for (const key of keys.slice(0, Math.max(0, keys.length - MAX_PERSISTED_TRAJECTORY_CACHE))) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 const DEFAULT_MODELS: ModelOption[] = [
   { id: 'gemini-4-neon', displayName: 'Gemini 4 Neon', description: '快速均衡 · 日常推理与编码', remainingFraction: 0.88, isDefault: true },
   { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon', description: '深度架构与复杂排障', remainingFraction: 0.72 },
@@ -87,6 +153,10 @@ const DEFAULT_MODELS: ModelOption[] = [
 ];
 
 export function App() {
+  const inTauri = isTauriRuntime();
+  const [cachedSnapshot] = useState<CachedSessionSnapshot | null>(() =>
+    inTauri ? readCachedSessionSnapshot() : null
+  );
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem('agy.theme') as ThemeMode | null;
     return saved || 'system';
@@ -123,7 +193,6 @@ export function App() {
     };
   }, [locale]);
 
-  const inTauri = isTauriRuntime();
   const [demoMode, setDemoMode] = useState(!inTauri);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [onboardingMsg, setOnboardingMsg] = useState('');
@@ -131,7 +200,9 @@ export function App() {
   const [onboardingLabel, setOnboardingLabel] = useState('');
   const cookieFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [accounts, setAccounts] = useState<AccountSummary[]>(() => (inTauri ? [] : DEMO_ACCOUNTS));
+  const [accounts, setAccounts] = useState<AccountSummary[]>(() =>
+    inTauri ? cachedSnapshot?.accounts || [] : DEMO_ACCOUNTS
+  );
   const [accountErrors, setAccountErrors] = useState<AccountFetchError[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>({
     serverUrl: 'https://antigravity.yterm.cn',
@@ -140,11 +211,21 @@ export function App() {
     vaultVersion: 0,
     lastSyncedMs: 0,
   });
-  const [devices, setDevices] = useState<DeviceInstance[]>(() => (inTauri ? [] : DEMO_DEVICES));
-  const [sessions, setSessions] = useState<UnifiedSessionSummary[]>(() => (inTauri ? [] : DEMO_SESSIONS));
-  const [activeSession, setActiveSession] = useState<UnifiedSessionSummary | null>(() =>
-    inTauri ? null : DEMO_SESSIONS[0]
+  const [devices, setDevices] = useState<DeviceInstance[]>(() =>
+    inTauri ? cachedSnapshot?.devices || [] : DEMO_DEVICES
   );
+  const [sessions, setSessions] = useState<UnifiedSessionSummary[]>(() =>
+    inTauri ? cachedSnapshot?.sessions || [] : DEMO_SESSIONS
+  );
+  const [activeSession, setActiveSession] = useState<UnifiedSessionSummary | null>(() => {
+    if (!inTauri) return DEMO_SESSIONS[0];
+    const cached = cachedSnapshot;
+    return (
+      cached?.sessions.find((session) => session.id === cached.activeSessionId) ||
+      cached?.sessions?.[0] ||
+      null
+    );
+  });
 
   const [timeline, setTimeline] = useState<TimelineItem[]>(() => (inTauri ? [] : DEMO_TIMELINE));
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(() =>
@@ -167,6 +248,7 @@ export function App() {
   const activeStreamIdRef = useRef<string | null>(null);
   const pendingApprovalKeyRef = useRef<string | null>(null);
   const sessionLoadSeqRef = useRef(0);
+  const streamRefreshTimerRef = useRef<number | null>(null);
   const trajectoryCacheRef = useRef(new Map<string, unknown[]>());
   const modelCacheRef = useRef(new Map<string, ModelOption[]>());
   const slashCacheRef = useRef(new Map<string, Array<{ cmd: string; desc: string }>>());
@@ -181,6 +263,29 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  // Cold-start snapshot: render the last known sessions immediately while
+  // refreshLiveSessions revalidates in the background.
+  useEffect(() => {
+    if (!inTauri || accounts.length === 0) return;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(
+          SESSION_SNAPSHOT_KEY,
+          JSON.stringify({
+            savedAtMs: Date.now(),
+            accounts,
+            devices,
+            sessions: sessions.slice(0, 200),
+            activeSessionId: activeSession?.id,
+          })
+        );
+      } catch {
+        // Ignore quota errors; live data still works.
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [accounts, devices, sessions, activeSession, inTauri]);
 
   const hasLiveAccount = useMemo(
     () => accounts.some((a) => !a.id.startsWith('demo-') && a.authenticated && a.enabled),
@@ -241,6 +346,10 @@ export function App() {
       return;
     }
 
+    if (streamRefreshTimerRef.current !== null) {
+      window.clearTimeout(streamRefreshTimerRef.current);
+      streamRefreshTimerRef.current = null;
+    }
     if (activeStreamIdRef.current) {
       void stopAgentStream(activeStreamIdRef.current).catch(() => {});
       activeStreamIdRef.current = null;
@@ -299,10 +408,11 @@ export function App() {
       );
       if (!isCurrent()) return;
       const rawSteps = resp.steps || [];
-      trajectoryCacheRef.current.set(cacheKey, rawSteps.slice(-100));
+      cacheTrajectory(trajectoryCacheRef.current, cacheKey, rawSteps.slice(-100));
       try {
         if (rawSteps.length > 0) {
           localStorage.setItem(cacheKey, JSON.stringify(rawSteps.slice(-100)));
+          prunePersistedTrajectoryCache();
         }
       } catch {
         // Ignore quota errors
@@ -366,21 +476,33 @@ export function App() {
       if (evt.kind === 'connected') {
         setIsLiveConnected(true);
       } else if (evt.kind === 'update') {
-        const payload = evt.payload as { stepCount?: number } | undefined;
-        const nextOffset = Math.max(0, (payload?.stepCount || session.stepCount || 0) - 100);
-        void getTrajectorySteps(session.accountId, session.deviceUuid, session.cascadeId, nextOffset)
-          .then((r) => {
-            if (!isCurrent()) return;
-            const rawSteps = r.steps || [];
-            trajectoryCacheRef.current.set(cacheKey, rawSteps.slice(-100));
-            const norm = normalizeTrajectorySteps(rawSteps, session.cascadeId);
-            setTimeline(norm.items);
-            setPendingApproval(norm.pendingApproval);
-            setAllDiffs(norm.allDiffs);
-            setTasks(norm.tasks);
-            setIsRunning(norm.isRunning);
-          })
-          .catch(() => {});
+        if (streamRefreshTimerRef.current !== null) {
+          window.clearTimeout(streamRefreshTimerRef.current);
+        }
+        streamRefreshTimerRef.current = window.setTimeout(() => {
+          streamRefreshTimerRef.current = null;
+          if (!isCurrent()) return;
+          const payload = evt.payload as { stepCount?: number } | undefined;
+          const nextOffset = Math.max(0, (payload?.stepCount || session.stepCount || 0) - 100);
+          void getTrajectorySteps(
+            session.accountId,
+            session.deviceUuid,
+            session.cascadeId,
+            nextOffset
+          )
+            .then((r) => {
+              if (!isCurrent()) return;
+              const rawSteps = r.steps || [];
+              cacheTrajectory(trajectoryCacheRef.current, cacheKey, rawSteps.slice(-100));
+              const norm = normalizeTrajectorySteps(rawSteps, session.cascadeId);
+              setTimeline(norm.items);
+              setPendingApproval(norm.pendingApproval);
+              setAllDiffs(norm.allDiffs);
+              setTasks(norm.tasks);
+              setIsRunning(norm.isRunning);
+            })
+            .catch(() => {});
+        }, 350);
       } else if (evt.kind === 'error') {
         setIsLiveConnected(false);
         if (evt.message.includes('SESSION_EXPIRED')) {
@@ -405,6 +527,15 @@ export function App() {
     }).catch(() => {
       if (isCurrent()) setIsLiveConnected(false);
     });
+  }, []);
+
+  // Restore the last active session immediately from the cold-start snapshot.
+  useEffect(() => {
+    if (!inTauri || !activeSession) return;
+    if (timeline.length > 0 || isTrajectoryLoading) return;
+    void loadSessionTrajectory(activeSession);
+    // Intentional mount-only restore; subsequent switches go through the UI.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refreshLiveSessions = useCallback(async () => {
@@ -437,6 +568,10 @@ export function App() {
       if (snapshot.devices.length > 0 || !onlyNetworkErrors) {
         setDevices(snapshot.devices);
         setSessions(snapshot.sessions);
+        const refreshedActive = activeSession
+          ? snapshot.sessions.find((session) => session.id === activeSession.id)
+          : null;
+        if (refreshedActive) setActiveSession(refreshedActive);
         const rootSessions = snapshot.sessions.filter(
           (s) => !s.parentCascadeId && !(s.nestingDepth && s.nestingDepth > 0)
         );
