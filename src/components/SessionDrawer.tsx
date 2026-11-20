@@ -115,7 +115,7 @@ export function SessionDrawer({
         type="button"
         onClick={() => {
           onSelectSession(s);
-          onClose();
+          if (variant === 'drawer') onClose();
         }}
         className="w-full text-left px-3 py-2.5 rounded-xl active:scale-[0.99] transition-all cursor-pointer"
         style={{
@@ -238,7 +238,7 @@ export function SessionDrawer({
             onClick={() => {
               if (targetDevice) {
                 onNewSession(targetDevice.accountId, targetDevice.uuid);
-                onClose();
+                if (variant === 'drawer') onClose();
               }
             }}
             className="w-full flex items-center justify-center gap-2 h-11 px-3 rounded-xl font-semibold text-[0.86rem] active:scale-[0.98] transition-transform cursor-pointer disabled:opacity-45"
