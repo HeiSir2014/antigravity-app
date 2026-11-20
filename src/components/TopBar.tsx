@@ -1,4 +1,4 @@
-import { FileDiff, ListChecks, Menu, Settings } from 'lucide-react';
+import { FileDiff, ListChecks, Menu, Search, Settings } from 'lucide-react';
 import { useI18n } from '../i18n';
 import type { UnifiedSessionSummary } from '../types/agent';
 
@@ -10,6 +10,7 @@ interface TopBarProps {
   taskCount: number;
   isLiveConnected: boolean;
   onOpenDrawer: () => void;
+  onOpenCommandPalette: () => void;
   onOpenDevices: () => void;
   onOpenDiff: () => void;
   onOpenTasks: () => void;
@@ -24,6 +25,7 @@ export function TopBar({
   taskCount,
   isLiveConnected,
   onOpenDrawer,
+  onOpenCommandPalette,
   onOpenDevices,
   onOpenDiff,
   onOpenTasks,
@@ -93,6 +95,17 @@ export function TopBar({
 
       {/* Right: Diff pill + Tasks + Settings */}
       <div className="flex items-center gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={onOpenCommandPalette}
+          aria-label={t('commandPalette')}
+          title={`${t('commandPalette')} (⌘K)`}
+          className="hidden sm:flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 transition-transform cursor-pointer"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          <Search className="w-4.5 h-4.5" />
+        </button>
+
         {(totalAdditions > 0 || totalDeletions > 0) && (
           <button
             type="button"

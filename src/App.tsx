@@ -40,6 +40,7 @@ import { isQuotaLimitError, normalizeTrajectorySteps } from './api/stepNormalize
 import { AgentTimeline } from './components/AgentTimeline';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { BottomSheet, type FontSizeMode } from './components/BottomSheet';
+import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
 import { formatResetCountdown } from './components/UsagePanel';
 import { SessionDrawer } from './components/SessionDrawer';
@@ -150,9 +151,21 @@ export function App() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [sheet, setSheet] = useState<SheetDestination | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
   const pendingApprovalKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandOpen((value) => !value);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const hasLiveAccount = useMemo(
     () => accounts.some((a) => !a.id.startsWith('demo-') && a.authenticated && a.enabled),
@@ -791,7 +804,8 @@ export function App() {
             totalDeletions={diffTotals.del}
             taskCount={tasks.length}
             isLiveConnected={isLiveConnected}
-            onOpenDrawer={() => {
+            onOpenCommandPalette={() => setCommandOpen(true)}
+        onOpenDrawer={() => {
               if (window.innerWidth >= 1024) {
                 setDesktopSidebarOpen((v) => !v);
               } else {
@@ -1358,6 +1372,18 @@ export function App() {
           if (updated.length > 0) setAccounts(updated);
           void refreshLiveSessions();
         }}
+      />
+
+      <CommandPalette
+        open={commandOpen}
+        sessions={sessions}
+        devices={devices}
+        accounts={accounts}
+        onClose={() => setCommandOpen(false)}
+        onSelectSession={(session) => void loadSessionTrajectory(session)}
+        onNewSession={(accountId, deviceUuid) => void handleNewSession(accountId, deviceUuid)}
+        onOpenSettings={() => setSheet({ kind: 'Settings' })}
+        onOpenUsage={() => setSheet({ kind: 'Settings', subPage: 'usage' })}
       />
         </div>
       </div>
