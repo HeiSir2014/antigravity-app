@@ -269,6 +269,13 @@ impl AntigravityClient {
     /// and persists any updated `Set-Cookie` values back into `AuthStore`.
     #[cfg(target_os = "macos")]
     fn refresh_from_webkit_cookies(&self, account: &AccountRecord) -> Option<AccountRecord> {
+        // The login WebView uses one shared WebKit cookie store. With multiple
+        // accounts it contains the most recently signed-in account, so silently
+        // importing it into an older account could switch identities. Only
+        // self-heal automatically while exactly one account is configured.
+        if self.auth.enabled_authenticated_accounts().len() > 1 {
+            return None;
+        }
         for bundle_id in ["com.google.antigravity.remoteapp", "antigravity-app"] {
             // Never let an older browser cookie file overwrite a newer vault.
             let store_mtime = crate::auth::webkit_cookie_store_mtime_ms(bundle_id);

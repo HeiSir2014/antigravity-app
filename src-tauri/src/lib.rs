@@ -238,14 +238,20 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
     #[cfg(desktop)]
     {
         if let Some(existing) = app.get_webview_window("google-login") {
-            let _ = existing.show();
-            let _ = existing.set_focus();
-            return Ok(());
+            // Recreate instead of reusing the old page: it may already be
+            // signed in as the first account and would auto-redirect again.
+            let _ = existing.close();
         }
-        let parsed: Url = "https://antigravity.google.com/remote"
-            .parse()
-            .map_err(|e| format!("{e}"))?;
-        let win = WebviewWindowBuilder::new(&app, "google-login", WebviewUrl::External(parsed))
+        // `AddSession` + `prompt=select_account` forces Google to show the
+        // account chooser ("Use another account") instead of silently
+        // reusing the first Google session in the shared WebKit cookie store.
+        let mut login_url =
+            Url::parse("https://accounts.google.com/AddSession").map_err(|e| format!("{e}"))?;
+        login_url
+            .query_pairs_mut()
+            .append_pair("continue", "https://antigravity.google.com/remote")
+            .append_pair("prompt", "select_account");
+        let win = WebviewWindowBuilder::new(&app, "google-login", WebviewUrl::External(login_url))
             .title("Sign in to Google Antigravity")
             .inner_size(520.0, 740.0)
             .user_agent(GOOGLE_SAFE_USER_AGENT)
