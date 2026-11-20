@@ -234,9 +234,25 @@ async fn download_app_update(
 }
 
 #[tauri::command]
-fn open_google_login(app: AppHandle) -> Result<(), String> {
+fn open_google_login(
+    app: AppHandle,
+    label: Option<String>,
+    email: Option<String>,
+) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        let account_label = label
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let account_email = email
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                account_label
+                    .as_deref()
+                    .filter(|value| value.contains('@'))
+                    .map(|value| value.to_string())
+            });
         if let Some(existing) = app.get_webview_window("google-login") {
             // Recreate instead of reusing the old page: it may already be
             // signed in as the first account and would auto-redirect again.
@@ -316,22 +332,17 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                 }
 
                 let state = app_handle.state::<AppState>();
-                let sync_email = state
-                    .sync
-                    .status()
-                    .user
-                    .map(|u| u.email)
-                    .filter(|e| !e.is_empty());
-                let label = sync_email
-                    .as_deref()
-                    .and_then(|e| e.split('@').next())
-                    .map(|s| s.to_string())
+                // Use the label/email captured before opening AddSession. The
+                // Cloud Sync email belongs to the first account and must never
+                // overwrite the identity of the account that just signed in.
+                let label = account_label
+                    .clone()
                     .or_else(|| Some("Google Account".to_string()));
 
                 if let Ok(summary) = state.auth.upsert_account_cookies(
                     None,
                     label,
-                    sync_email,
+                    account_email.clone(),
                     map,
                     accounts_map,
                     Some(0),

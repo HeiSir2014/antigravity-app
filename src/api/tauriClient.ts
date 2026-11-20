@@ -146,8 +146,8 @@ export async function downloadAppUpdate(
   });
 }
 
-export async function openGoogleLogin(): Promise<void> {
-  return invoke('open_google_login');
+export async function openGoogleLogin(label?: string, email?: string): Promise<void> {
+  return invoke('open_google_login', { label, email });
 }
 
 export async function harvestLoginCookies(params?: {

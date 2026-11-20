@@ -75,7 +75,7 @@ interface BottomSheetProps {
   onSelectSession: (s: UnifiedSessionSummary) => void;
   onApprove: (scope: 'once' | 'session') => void;
   onDeny: () => void;
-  onOpenGoogleLogin: () => Promise<void>;
+  onOpenGoogleLogin: (label?: string) => Promise<void>;
   onHarvestLoginCookies: (label: string) => Promise<void>;
   onImportAccountCookies: (label: string, raw: string) => Promise<void>;
   onToggleAccount: (accountId: string, enabled: boolean) => Promise<void>;
@@ -1121,7 +1121,9 @@ export function BottomSheet({
                       setBusy(true);
                       setStatusMsg('');
                       try {
-                        await onOpenGoogleLogin();
+                        await onOpenGoogleLogin(
+                          newLabel.trim() || `Google Account ${accounts.length + 1}`
+                        );
                         setStatusMsg('Login window opened — cookies will auto-capture once signed in.');
                       } catch (e) {
                         setStatusMsg(String(e));
