@@ -644,6 +644,7 @@ export function App() {
       void listen<AccountSummary>('agy:account-captured', () => {
         setDemoMode(false);
         setOnboardingMsg('');
+        setSheet(null);
         void refreshLiveSessions();
       }).then((fn) => {
         unlistenCaptured = fn;

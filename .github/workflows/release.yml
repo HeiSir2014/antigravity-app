@@ -96,7 +96,7 @@ jobs:
             - **Live Model & Slash Commands**: Falls back to `GetAvailableModels` when a workspace-runner LS returns an empty model catalog, and sends the resolved default model to `GetSlashCommands`.
             - **Android Notification Approval**: Approve / Deny / Deny-with-comment actions now cross the native bridge and resolve the pending interaction, with a WebKit-cookie login fallback.
             - **Two-Tier Auto-Updater**: ~140 KB incremental `web-bundle.tar.gz` delta updates + SHA-256 verified full native installers.
-            - **v2.0.6 Fix**: Second-account sign-in now stores the label/email entered in Add Account instead of inheriting the Cloud Sync account identity; Google sign-in still uses `AddSession` and multi-account 401 self-heal stays disabled to prevent crossover.
+            - **v2.0.7 Fix**: `Sign in with Google` is now a primary action on the Accounts page; the Add Account form and Settings sheet close when Google login opens, and successful capture closes any remaining sheet instead of leaving the user on the form.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

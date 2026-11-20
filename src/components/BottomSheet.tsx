@@ -1007,9 +1007,35 @@ export function BottomSheet({
 
               <button
                 type="button"
-                onClick={() => setSubPage('add-account')}
-                className="w-full flex items-center justify-center gap-2 h-11 rounded-2xl font-semibold text-[0.88rem] active:scale-[0.98] cursor-pointer"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setStatusMsg('');
+                  try {
+                    await onOpenGoogleLogin();
+                    onClose();
+                  } catch (error) {
+                    setStatusMsg(String(error));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className="w-full flex items-center justify-center gap-2 h-11 rounded-2xl font-semibold text-[0.88rem] active:scale-[0.98] cursor-pointer disabled:opacity-50"
                 style={{ background: 'var(--accent)', color: '#ffffff' }}
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>{t('signInGoogle')}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSubPage('add-account')}
+                className="w-full flex items-center justify-center gap-2 h-11 rounded-2xl font-semibold text-[0.88rem] border active:scale-[0.98] cursor-pointer"
+                style={{
+                  background: 'var(--bg-elevated)',
+                  borderColor: 'var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
               >
                 <Plus className="w-4.5 h-4.5" />
                 <span>{t('addAccountTitle')}</span>
@@ -1124,7 +1150,9 @@ export function BottomSheet({
                         await onOpenGoogleLogin(
                           newLabel.trim() || `Google Account ${accounts.length + 1}`
                         );
-                        setStatusMsg('Login window opened — cookies will auto-capture once signed in.');
+                        // The login window is a separate native window; the
+                        // Add Account form must not stay behind it.
+                        onClose();
                       } catch (e) {
                         setStatusMsg(String(e));
                       } finally {
