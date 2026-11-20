@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react';
-import { ArrowUp, Cpu, ImagePlus, Shield, Sparkles, Square, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUp, Cpu, ImagePlus, Plus, Shield, Sparkles, Square, X } from 'lucide-react';
 import { useI18n } from '../i18n';
 import type { MediaAttachment, PermissionMode } from '../types/agent';
 
@@ -8,7 +8,6 @@ interface ComposerProps {
   activeModel: string;
   serverSlashCommands?: Array<{ cmd: string; desc: string }>;
   isRunning: boolean;
-  hideQuickChips?: boolean;
   onSend: (text: string, attachments: MediaAttachment[]) => void;
   onStop: () => void;
   onOpenPermissionSheet: () => void;
@@ -25,7 +24,6 @@ export function Composer({
   activeModel,
   serverSlashCommands,
   isRunning,
-  hideQuickChips = false,
   onSend,
   onStop,
   onOpenPermissionSheet,
@@ -34,9 +32,20 @@ export function Composer({
   const { t } = useI18n();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const lastCompositionEndRef = useRef(0);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutside);
+    return () => document.removeEventListener('pointerdown', closeOnOutside);
+  }, [menuOpen]);
 
   const slashCommands = useMemo<SlashCommandDef[]>(() => {
     if (serverSlashCommands && serverSlashCommands.length > 0) {
@@ -121,17 +130,6 @@ export function Composer({
     }
   };
 
-  const insertChip = (chip: string) => {
-    const next = text ? `${text} ${chip} ` : `${chip} `;
-    setText(next);
-    requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-        adjustHeight(textareaRef.current);
-      }
-    });
-  };
-
   return (
     <footer
       className="relative px-3 md:px-6 pt-1.5 pb-2.5 shrink-0 border-t"
@@ -168,27 +166,6 @@ export function Composer({
                   {item.desc}
                 </span>
               </div>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Horizontal quick slash rail (hidden when slash palette or approval banner is active) */}
-      {!hideQuickChips && slashSuggestions.length === 0 && (
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar scroll-fade-right pr-5 mb-2">
-          {slashCommands.slice(0, 5).map((item) => (
-            <button
-              key={item.cmd}
-              type="button"
-              onClick={() => insertChip(item.cmd)}
-              className="px-2.5 h-7 rounded-full text-[0.74rem] font-mono font-medium shrink-0 active:scale-95 transition-transform cursor-pointer"
-              style={{
-                background: 'var(--bg-elevated)',
-                border: '1px solid var(--border-subtle)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              {item.cmd}
             </button>
           ))}
         </div>
@@ -284,31 +261,55 @@ export function Composer({
 
         <div className="flex items-center justify-between gap-2 mt-1.5">
           <div className="flex items-center gap-1.5 min-w-0">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach image or file"
-              className="flex items-center justify-center w-8 h-8 rounded-full active:scale-95 cursor-pointer shrink-0"
-              style={{
-                background: 'var(--bg-elevated)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <ImagePlus className="w-4 h-4" />
-            </button>
+            <div ref={menuRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((value) => !value)}
+                aria-label={t('composerMenu')}
+                aria-expanded={menuOpen}
+                className="flex items-center justify-center w-8 h-8 rounded-full active:scale-95 cursor-pointer"
+                style={{
+                  background: menuOpen ? 'var(--accent-soft)' : 'var(--bg-elevated)',
+                  color: menuOpen ? 'var(--accent)' : 'var(--text-secondary)',
+                }}
+              >
+                <Plus className="w-4 h-4" />
+              </button>
 
-            <button
-              type="button"
-              onClick={onOpenPermissionSheet}
-              className="flex items-center gap-1 h-7.5 px-2.5 rounded-full text-[0.74rem] font-medium active:scale-95 cursor-pointer shrink-0"
-              style={{
-                background: 'var(--bg-elevated)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <Shield className="w-3 h-3" />
-              <span>{permLabels[permissionMode]}</span>
-            </button>
+              {menuOpen && (
+                <div
+                  className="absolute bottom-full left-0 mb-2 w-60 rounded-xl border shadow-xl overflow-hidden z-30"
+                  style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-strong)' }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      fileInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left active:opacity-75 cursor-pointer"
+                  >
+                    <ImagePlus className="w-4 h-4 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+                    <span className="text-[0.8rem] font-medium">{t('attachFile')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onOpenPermissionSheet();
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left border-t active:opacity-75 cursor-pointer"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <Shield className="w-4 h-4 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+                    <span className="text-[0.8rem] font-medium flex-1">{t('permissionsRow')}</span>
+                    <span className="text-[0.72rem]" style={{ color: 'var(--text-muted)' }}>
+                      {permLabels[permissionMode]}
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
 
             <button
               type="button"

@@ -1242,7 +1242,6 @@ export function App() {
           activeModel={activeModel}
           serverSlashCommands={remoteSlashCommands}
           isRunning={isRunning}
-          hideQuickChips={Boolean(pendingApproval)}
           onSend={(t, atts) => void handleSend(t, atts)}
           onStop={() => void handleStop()}
           onOpenPermissionSheet={() => setSheet({ kind: 'PermissionModeSelection' })}
