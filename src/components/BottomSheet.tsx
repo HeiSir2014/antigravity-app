@@ -512,11 +512,15 @@ export function BottomSheet({
                   <button
                     key={m.id}
                     type="button"
+                    disabled={m.disabled}
                     onClick={() => {
+                      if (m.disabled) return;
                       onChangeModel(m.displayName);
                       onClose();
                     }}
-                    className="w-full p-3.5 rounded-2xl border text-left active:scale-[0.99] cursor-pointer space-y-1.5"
+                    className={`w-full p-3.5 rounded-2xl border text-left space-y-1.5 ${
+                      m.disabled ? 'opacity-50 cursor-not-allowed' : 'active:scale-[0.99] cursor-pointer'
+                    }`}
                     style={{
                       background: active ? 'var(--accent-soft)' : 'var(--bg-elevated)',
                       borderColor: active ? 'var(--accent)' : 'var(--border-subtle)',

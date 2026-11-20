@@ -90,7 +90,9 @@ jobs:
             - **Pure-Native Tauri v2 + Rust Engine**: Zero WebView DOM injection — speaks Google Antigravity's native `application/json+protobuf` (`boq-jetski` + `LanguageServerService`) protocol directly in Rust.
             - **Multi-Account × Multi-Device Concurrent Aggregation**: View all remote workstations and live coding sessions in one unified feed (`Unified` / `By Account` / `By Device`).
             - **Adaptive Claude Mobile & Desktop UX**: Persistent `280px` split-pane sidebar on Desktop (`>= 1024px`); touch-ergonomic swipe drawer, bottom sheets, edge-to-edge safe-area & IME insets on Android.
-            - **Cookie-First Onboarding + Live Verification + AES-256-GCM Cloud Sync**: Import Cookies via text, `Copy as cURL`, Cookie-Editor JSON, or Netscape `cookies.txt` — live-verified against Google Antigravity before pushing to encrypted Cloud Vault (`https://antigravity.yterm.cn`), with 1-Tap Google OIDC SSO on Desktop & Android (`antigravity://auth/callback`).
+            - **Cookie Self-Heal + Cloud Vault Sync**: `ListInstances` 401 automatically re-imports the live WebKit cookie store, retries, and syncs the repaired vault to the Cloud Vault (AES-256-GCM at rest, TLS in transit) within 30 seconds.
+            - **Live Model & Slash Commands**: Falls back to `GetAvailableModels` when a workspace-runner LS returns an empty model catalog, and sends the resolved default model to `GetSlashCommands`.
+            - **Android Notification Approval**: Approve / Deny / Deny-with-comment actions now cross the native bridge and resolve the pending interaction, with a WebKit-cookie login fallback.
             - **Two-Tier Auto-Updater**: ~140 KB incremental `web-bundle.tar.gz` delta updates + SHA-256 verified full native installers.
           releaseDraft: false
           prerelease: false

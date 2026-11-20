@@ -54,7 +54,7 @@ class AGYPermissionActionReceiver : BroadcastReceiver() {
             }
         }.toString()
 
-        MainActivity.dispatchNativeEventToWebView(payloadJson)
+        MainActivity.dispatchNativeEventToWebView("agy:permission-action", payloadJson)
 
         // Update notification in-place with FLAG_ONLY_ALERT_ONCE (matching Claude's notificationO3.flags |= 8)
         val nm = context.getSystemService(NotificationManager::class.java) ?: return

@@ -142,9 +142,14 @@ export interface ModelOption {
   id: string;
   displayName: string;
   description?: string;
+  /** Official `exa.codeium_common_pb.Model` enum name, e.g. `MODEL_GOOGLE_GEMINI_2_5_PRO`. */
+  enumModel?: string;
+  /** Official `ClientModelConfig.model_id` (stable server-side id). */
+  modelId?: string;
   remainingFraction?: number;
   resetTimeMs?: number;
   isDefault?: boolean;
+  disabled?: boolean;
 }
 
 export interface AskUserQuestionData {

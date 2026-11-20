@@ -17,3 +17,7 @@ src-tauri/gen/android/local.properties
 src-tauri/gen/android/tauri.settings.gradle
 src-tauri/gen/android/key.properties
 src-tauri/gen/android/keystore.properties
+
+# Reverse-engineering scratch artifacts (not for commit)
+.reverse/
+.gstack/

@@ -22,6 +22,100 @@ function asStr(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
+/** Official `google.protobuf.Duration` JSON is `{ seconds, nanos }`. */
+function durationSeconds(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return Math.max(1, Math.round(v));
+  }
+  const obj = asObj(v);
+  if (!obj) {
+    if (typeof v === 'string') {
+      const seconds = Number.parseFloat(v);
+      return Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.round(seconds)) : undefined;
+    }
+    return undefined;
+  }
+  const seconds = Number(obj.seconds ?? 0);
+  const nanos = Number(obj.nanos ?? 0);
+  const total = (Number.isFinite(seconds) ? seconds : 0) + (Number.isFinite(nanos) ? nanos / 1e9 : 0);
+  return total > 0 ? Math.max(1, Math.round(total)) : undefined;
+}
+
+function approvalFromRequestedInteraction(
+  step: Record<string, unknown>,
+  requested: Record<string, unknown>,
+  trajectoryId: string,
+  stepIndex: number
+): PendingApproval | null {
+  const runCommand = asObj(requested.runCommand);
+  if (runCommand) {
+    const stepRun = asObj(step.runCommand);
+    const commandLine = asStr(
+      runCommand.commandLine ||
+        runCommand.proposedCommandLine ||
+        stepRun?.commandLine ||
+        stepRun?.proposedCommandLine ||
+        stepRun?.command
+    );
+    return {
+      trajectoryId,
+      stepIndex,
+      kind: 'runCommand',
+      toolName: 'Run Command',
+      title: 'Allow terminal command?',
+      commandOrDiff: commandLine,
+    };
+  }
+
+  const filePermission = asObj(requested.filePermission);
+  if (filePermission) {
+    const codeAction = asObj(step.codeAction);
+    const filePermissionRequest = asObj(codeAction?.filePermissionRequest);
+    const path = asStr(
+      filePermission.absolutePathUri ||
+        filePermission.absolutePathMigrateMeToUri ||
+        filePermissionRequest?.absolutePathUri
+    );
+    return {
+      trajectoryId,
+      stepIndex,
+      kind: 'filePermission',
+      toolName: 'Edit File',
+      title: path ? `Allow edit to ${path.split('/').pop() || path}?` : 'Allow file access?',
+      commandOrDiff: path,
+      filePath: path,
+    };
+  }
+
+  const permission = asObj(requested.permission);
+  if (permission) {
+    const detail = asStr(
+      permission.actionDescription || permission.reason || permission.resource || 'Permission required'
+    );
+    return {
+      trajectoryId,
+      stepIndex,
+      kind: 'permission',
+      toolName: 'Permission',
+      title: 'Allow this action?',
+      commandOrDiff: detail,
+    };
+  }
+
+  if (asObj(requested.approvalInteraction)) {
+    return {
+      trajectoryId,
+      stepIndex,
+      kind: 'plan',
+      toolName: 'Approval',
+      title: 'Approve this plan?',
+      commandOrDiff: '',
+    };
+  }
+
+  return null;
+}
+
 export function isQuotaLimitError(message: string, errorCode?: string): boolean {
   const combined = `${errorCode || ''} ${message || ''}`.toUpperCase();
   return (
@@ -109,8 +203,23 @@ function classifyTool(rawType: string): ToolCategory {
 function mapStepStatus(raw: unknown): 'running' | 'done' | 'error' | 'waiting' {
   const s = String(raw || '').toUpperCase();
   if (s.includes('WAITING')) return 'waiting';
-  if (s.includes('RUNNING') || s.includes('GENERATING') || s.includes('PENDING')) return 'running';
-  if (s.includes('ERROR') || s.includes('FAILED') || s.includes('CANCEL')) return 'error';
+  if (
+    s.includes('RUNNING') ||
+    s.includes('GENERATING') ||
+    s.includes('PENDING') ||
+    s.includes('QUEUED')
+  ) {
+    return 'running';
+  }
+  if (
+    s.includes('ERROR') ||
+    s.includes('FAILED') ||
+    s.includes('CANCEL') ||
+    s.includes('INVALID') ||
+    s.includes('INTERRUPTED')
+  ) {
+    return 'error';
+  }
   return 'done';
 }
 
@@ -132,6 +241,21 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
     const stepType = asStr(step.type || step.stepType);
     const status = mapStepStatus(step.status);
     if (status === 'running') isRunning = true;
+
+    // Official approvals are carried by requested_interaction, not only by
+    // CORTEX_STEP_STATUS_WAITING. Read it before the step-type renderers.
+    const requestedInteraction = asObj(step.requestedInteraction);
+    const completedInteractions = Array.isArray(step.completedInteractions)
+      ? step.completedInteractions
+      : [];
+    if (requestedInteraction && completedInteractions.length === 0 && !pendingApproval) {
+      pendingApproval = approvalFromRequestedInteraction(
+        step,
+        requestedInteraction,
+        trajectoryId,
+        idx
+      );
+    }
 
     // 1. User Input
     const userInput = asObj(step.userInput);
@@ -164,9 +288,11 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
           kind: 'thinking',
           stepIndex: idx,
           text: thinking.trim(),
-          durationSec: typeof planner?.thinkingDurationMs === 'number'
-            ? Math.max(1, Math.round(planner.thinkingDurationMs / 1000))
-            : undefined,
+          durationSec:
+            durationSeconds(planner?.thinkingDuration) ??
+            (typeof planner?.thinkingDurationMs === 'number'
+              ? Math.max(1, Math.round(planner.thinkingDurationMs / 1000))
+              : undefined),
           isStreaming: status === 'running' && !asStr(planner?.response || planner?.modifiedResponse),
         });
       }
@@ -219,7 +345,7 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
       };
       items.push({ id: tool.id, kind: 'tool', stepIndex: idx, tool });
 
-      if (status === 'waiting') {
+      if (!pendingApproval && completedInteractions.length === 0 && status === 'waiting') {
         pendingApproval = {
           trajectoryId,
           stepIndex: idx,
@@ -235,16 +361,49 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
     // 4. Code Action / File Edit
     const codeAction = asObj(step.codeAction) || asObj(step.writeToFile) || asObj(step.replaceFileContent);
     if (codeAction || stepType.includes('CODE_ACTION') || stepType.includes('WRITE_TO_FILE')) {
+      const actionSpec = asObj(codeAction?.actionSpec);
+      const actionResult = asObj(codeAction?.actionResult);
+      const editResult = asObj(actionResult?.edit);
+      const specCommand = asObj(actionSpec?.command);
+      const specCreate = asObj(actionSpec?.createFile);
+      const specDelete = asObj(actionSpec?.deleteFile);
+      const specSed = asObj(actionSpec?.sed);
+      const specPath =
+        asObj(specCommand?.file) ||
+        asObj(specCreate?.path) ||
+        asObj(specDelete?.path) ||
+        asObj(specSed?.path);
       const targetUri = asStr(
-        asObj(codeAction?.actionSpec)?.targetUri ||
+        editResult?.absoluteUri ||
+          editResult?.absolutePathMigrateMeToUri ||
+          specPath?.absoluteUri ||
+          specPath?.absolutePathMigrateMeToUri ||
           codeAction?.targetFile ||
           codeAction?.path ||
           codeAction?.uri
       );
       const fileName = targetUri ? targetUri.split('/').pop() || targetUri : 'File edit';
-      const diffText = asStr(
-        asObj(codeAction?.diff)?.unifiedDiff || codeAction?.unifiedDiff || codeAction?.codeContent || ''
-      );
+
+      // Official diff is ActionResult.edit.diff.unifiedDiff.lines[] with
+      // UNIFIED_DIFF_LINE_TYPE_INSERT/DELETE/UNCHANGED, not a unified string.
+      const rawDiffLines = asObj(asObj(editResult?.diff)?.unifiedDiff)?.lines;
+      let diffText = '';
+      if (Array.isArray(rawDiffLines)) {
+        diffText = rawDiffLines
+          .map((line) => {
+            const obj = asObj(line);
+            const type = asStr(obj?.type);
+            const text = asStr(obj?.text);
+            const prefix = type.endsWith('INSERT') ? '+' : type.endsWith('DELETE') ? '-' : ' ';
+            return `${prefix}${text}`;
+          })
+          .join('\n');
+      }
+      if (!diffText) {
+        diffText = asStr(
+          asObj(codeAction?.diff)?.unifiedDiff || codeAction?.unifiedDiff || codeAction?.codeContent || ''
+        );
+      }
       const additions = diffText ? (diffText.match(/^\+[^+]/gm) || []).length : 0;
       const deletions = diffText ? (diffText.match(/^-[^-]/gm) || []).length : 0;
 
@@ -277,7 +436,12 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
         }
       }
 
-      if (status === 'waiting') {
+      const filePermissionRequest = asObj(codeAction?.filePermissionRequest);
+      if (
+        !pendingApproval &&
+        completedInteractions.length === 0 &&
+        (filePermissionRequest || status === 'waiting')
+      ) {
         pendingApproval = {
           trajectoryId,
           stepIndex: idx,
@@ -285,7 +449,7 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
           toolName: 'Edit File',
           title: `Allow edit to ${fileName}?`,
           commandOrDiff: diffText || targetUri,
-          filePath: targetUri,
+          filePath: targetUri || asStr(filePermissionRequest?.absolutePathUri),
         };
       }
       return;
@@ -294,7 +458,7 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
     // 5. Notify User / Plan Review
     const notifyUser = asObj(step.notifyUser);
     if (notifyUser || stepType.includes('NOTIFY_USER')) {
-      const msg = asStr(notifyUser?.message);
+      const msg = asStr(notifyUser?.notificationContent || notifyUser?.message);
       if (msg) {
         items.push({
           id: `notify-${idx}`,
@@ -309,7 +473,9 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
     // 6. Task Boundary
     const taskBoundary = asObj(step.taskBoundary);
     if (taskBoundary) {
-      const taskName = asStr(taskBoundary.taskName || taskBoundary.taskStatus);
+      const taskName = asStr(
+        taskBoundary.taskName || taskBoundary.taskSummary || taskBoundary.taskStatus
+      );
       if (taskName) {
         tasks.push({
           id: `task-${idx}`,

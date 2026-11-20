@@ -6,6 +6,7 @@ import type { MediaAttachment, PermissionMode } from '../types/agent';
 interface ComposerProps {
   permissionMode: PermissionMode;
   activeModel: string;
+  serverSlashCommands?: Array<{ cmd: string; desc: string }>;
   isRunning: boolean;
   hideQuickChips?: boolean;
   onSend: (text: string, attachments: MediaAttachment[]) => void;
@@ -19,20 +20,10 @@ interface SlashCommandDef {
   desc: string;
 }
 
-const SLASH_COMMANDS: SlashCommandDef[] = [
-  { cmd: '/plan', desc: 'Create a step-by-step implementation plan before coding' },
-  { cmd: '/review', desc: 'Review current git diff & highlight bugs or risks' },
-  { cmd: '/compact', desc: 'Summarize & compact conversation context' },
-  { cmd: '/test', desc: 'Run test suite and fix failing assertions' },
-  { cmd: '/diff', desc: 'Inspect staged & unstaged workspace changes' },
-  { cmd: '/goal', desc: 'Autonomous long-running goal mode until complete' },
-  { cmd: '/grill-me', desc: 'Interactive design interview to clarify requirements' },
-  { cmd: '/learn', desc: 'Persist learned workspace rules for future sessions' },
-];
-
 export function Composer({
   permissionMode,
   activeModel,
+  serverSlashCommands,
   isRunning,
   hideQuickChips = false,
   onSend,
@@ -47,8 +38,11 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const lastCompositionEndRef = useRef(0);
 
-  const slashCommands = useMemo<SlashCommandDef[]>(
-    () => [
+  const slashCommands = useMemo<SlashCommandDef[]>(() => {
+    if (serverSlashCommands && serverSlashCommands.length > 0) {
+      return serverSlashCommands;
+    }
+    return [
       { cmd: '/plan', desc: t('slashPlan') },
       { cmd: '/review', desc: t('slashReview') },
       { cmd: '/compact', desc: t('slashCompact') },
@@ -57,9 +51,8 @@ export function Composer({
       { cmd: '/goal', desc: t('slashGoal') },
       { cmd: '/grill-me', desc: t('slashGrill') },
       { cmd: '/learn', desc: t('slashLearn') },
-    ],
-    [t]
-  );
+    ];
+  }, [t, serverSlashCommands]);
 
   const permLabels: Record<PermissionMode, string> = {
     'request-review': t('permAsk'),

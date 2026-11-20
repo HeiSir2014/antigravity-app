@@ -10,13 +10,13 @@ use protocol::client::{
     AgentStreamEvent, AllSessionsSnapshot, AntigravityClient, QuotaDashboardSnapshot,
 };
 use protocol::wire::DeviceInstance;
-use sync::{SyncClient, SyncStatusInfo};
-use updater::{ReleaseAssetInfo, UpdateCheckResult, UpdateDownloadEvent};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use sync::{SyncClient, SyncStatusInfo};
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
+use updater::{ReleaseAssetInfo, UpdateCheckResult, UpdateDownloadEvent};
 
 #[cfg(desktop)]
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
@@ -33,6 +33,21 @@ struct AppState {
     client: Arc<AntigravityClient>,
     sync: Arc<SyncClient>,
     active_streams: Mutex<HashMap<String, oneshot::Sender<()>>>,
+}
+
+#[cfg(target_os = "macos")]
+fn merge_webkit_cookie_fallback(
+    app: &AppHandle,
+    cookies: &mut HashMap<String, String>,
+    accounts_cookies: &mut HashMap<String, String>,
+) {
+    let (google, accounts) = crate::auth::read_webkit_binary_cookies(&app.config().identifier);
+    for (name, value) in google {
+        cookies.entry(name).or_insert(value);
+    }
+    for (name, value) in accounts {
+        accounts_cookies.entry(name).or_insert(value);
+    }
 }
 
 #[tauri::command]
@@ -81,12 +96,15 @@ async fn import_account_cookies(
         if is_new {
             let _ = state.auth.remove_account(&summary.id);
         }
-        return Err(format!("Cookie verification failed (expired or unauthorized): {err}"));
+        return Err(format!(
+            "Cookie verification failed (expired or unauthorized): {err}"
+        ));
     }
 
     // Verified valid! Auto-push encrypted vault to Cloud Sync if signed in
     if state.sync.status().signed_in {
         if let Ok(st) = state.sync.push_vault().await {
+            state.auth.clear_dirty();
             let _ = app.emit("agy:sync-updated", &st);
         }
     }
@@ -177,7 +195,9 @@ fn sync_logout(state: State<'_, AppState>) -> Result<SyncStatusInfo, String> {
 
 #[tauri::command]
 async fn sync_push_vault(state: State<'_, AppState>) -> Result<SyncStatusInfo, String> {
-    state.sync.push_vault().await
+    let status = state.sync.push_vault().await?;
+    state.auth.clear_dirty();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -238,14 +258,6 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
         // as soon as sign-in completes and redirects back to antigravity.google.com.
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            let target_url: Url = match "https://antigravity.google.com/".parse() {
-                Ok(u) => u,
-                Err(_) => return,
-            };
-            let accounts_url: Url = match "https://accounts.google.com/".parse() {
-                Ok(u) => u,
-                Err(_) => return,
-            };
             for _ in 0..240 {
                 tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 let Some(login_win) = app_handle.get_webview_window("google-login") else {
@@ -254,18 +266,39 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                 let on_agy = login_win
                     .url()
                     .ok()
-                    .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case("antigravity.google.com")))
+                    .and_then(|u| {
+                        u.host_str()
+                            .map(|h| h.eq_ignore_ascii_case("antigravity.google.com"))
+                    })
                     .unwrap_or(false);
                 if !on_agy {
                     continue;
                 }
-                let Ok(cookies) = login_win.cookies_for_url(target_url.clone()) else {
-                    continue;
-                };
+                // `cookies_for_url` can return Err on macOS even though the
+                // live WKWebView cookie store has everything. `cookies()` reads
+                // the whole store and works while the login window is still open.
                 let mut map = HashMap::new();
-                for c in cookies {
-                    map.insert(c.name().to_string(), c.value().to_string());
+                let mut accounts_map = HashMap::new();
+                if let Ok(cookies) = login_win.cookies() {
+                    for c in cookies {
+                        let domain = c.domain().unwrap_or_default();
+                        if domain == "accounts.google.com" {
+                            accounts_map.insert(c.name().to_string(), c.value().to_string());
+                        } else if domain == "antigravity.google.com"
+                            || domain == "google.com"
+                            || domain == ".google.com"
+                            || domain == "google.com.sg"
+                            || domain == ".google.com.sg"
+                        {
+                            map.insert(c.name().to_string(), c.value().to_string());
+                        }
+                    }
                 }
+                // Merge the WebKit binary cookie store BEFORE checking for
+                // SAPISID/SID: cookies_for_url can return Err/empty on macOS.
+                #[cfg(target_os = "macos")]
+                merge_webkit_cookie_fallback(&app_handle, &mut map, &mut accounts_map);
+
                 let has_sapisid = map.contains_key("SAPISID")
                     || map.contains_key("__Secure-3PAPISID")
                     || map.contains_key("__Secure-1PAPISID");
@@ -274,15 +307,6 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                     || map.contains_key("__Secure-3PSID");
                 if !has_sapisid || !has_sid {
                     continue;
-                }
-
-                // Also harvest accounts.google.com host-only cookies (__Host-1PLSID, __Host-3PLSID, LSID)
-                // so our background RotateCookies keepalive can continuously refresh __Secure-1PSIDTS!
-                let mut accounts_map = HashMap::new();
-                if let Ok(acc_cookies) = login_win.cookies_for_url(accounts_url.clone()) {
-                    for c in acc_cookies {
-                        accounts_map.insert(c.name().to_string(), c.value().to_string());
-                    }
                 }
 
                 let state = app_handle.state::<AppState>();
@@ -312,6 +336,7 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                         // Auto-push encrypted vault to Cloud Sync if signed in, so Mobile syncs automatically
                         if state.sync.status().signed_in {
                             if let Ok(st) = state.sync.push_vault().await {
+                                state.auth.clear_dirty();
                                 let _ = app_handle.emit("agy:sync-updated", &st);
                             }
                         }
@@ -344,23 +369,25 @@ fn harvest_login_cookies(
         let win = app
             .get_webview_window("google-login")
             .ok_or_else(|| "Google login window is not open".to_string())?;
-        let url: Url = "https://antigravity.google.com/"
-            .parse()
-            .map_err(|e| format!("{e}"))?;
-        let accounts_url: Url = "https://accounts.google.com/"
-            .parse()
-            .map_err(|e| format!("{e}"))?;
-        let cookies = win.cookies_for_url(url).map_err(|e| e.to_string())?;
         let mut map = HashMap::new();
-        for c in cookies {
-            map.insert(c.name().to_string(), c.value().to_string());
-        }
         let mut accounts_map = HashMap::new();
-        if let Ok(acc_cookies) = win.cookies_for_url(accounts_url) {
-            for c in acc_cookies {
-                accounts_map.insert(c.name().to_string(), c.value().to_string());
+        if let Ok(cookies) = win.cookies() {
+            for c in cookies {
+                let domain = c.domain().unwrap_or_default();
+                if domain == "accounts.google.com" {
+                    accounts_map.insert(c.name().to_string(), c.value().to_string());
+                } else if domain == "antigravity.google.com"
+                    || domain == "google.com"
+                    || domain == ".google.com"
+                    || domain == "google.com.sg"
+                    || domain == ".google.com.sg"
+                {
+                    map.insert(c.name().to_string(), c.value().to_string());
+                }
             }
         }
+        #[cfg(target_os = "macos")]
+        merge_webkit_cookie_fallback(&app, &mut map, &mut accounts_map);
         let summary = state.auth.upsert_account_cookies(
             account_id,
             label,
@@ -404,7 +431,12 @@ async fn get_trajectory_steps(
 ) -> Result<Value, String> {
     state
         .client
-        .get_trajectory_steps(&account_id, &device_uuid, &cascade_id, step_offset.unwrap_or(0))
+        .get_trajectory_steps(
+            &account_id,
+            &device_uuid,
+            &cascade_id,
+            step_offset.unwrap_or(0),
+        )
         .await
 }
 
@@ -444,7 +476,10 @@ async fn get_user_status(
     account_id: String,
     device_uuid: String,
 ) -> Result<Value, String> {
-    state.client.get_user_status(&account_id, &device_uuid).await
+    state
+        .client
+        .get_user_status(&account_id, &device_uuid)
+        .await
 }
 
 #[tauri::command]
@@ -480,7 +515,36 @@ async fn get_model_configs(
     account_id: String,
     device_uuid: String,
 ) -> Result<Value, String> {
-    state.client.get_model_configs(&account_id, &device_uuid).await
+    state
+        .client
+        .get_model_configs(&account_id, &device_uuid)
+        .await
+}
+
+#[tauri::command]
+async fn get_workspace_infos(
+    state: State<'_, AppState>,
+    account_id: String,
+    device_uuid: String,
+) -> Result<Value, String> {
+    state
+        .client
+        .get_workspace_infos(&account_id, &device_uuid)
+        .await
+}
+
+#[tauri::command]
+async fn get_slash_commands(
+    state: State<'_, AppState>,
+    account_id: String,
+    device_uuid: String,
+    cascade_id: String,
+    model: Option<String>,
+) -> Result<Value, String> {
+    state
+        .client
+        .get_slash_commands(&account_id, &device_uuid, &cascade_id, model)
+        .await
 }
 
 #[tauri::command]
@@ -503,6 +567,7 @@ async fn rotate_account_cookies(
     };
     if changed && state.sync.status().signed_in {
         if let Ok(st) = state.sync.push_vault().await {
+            state.auth.clear_dirty();
             let _ = app.emit("agy:sync-updated", &st);
         }
     }
@@ -589,6 +654,10 @@ pub fn run() {
             let bg_client = client.clone();
             let bg_sync = sync.clone();
             let bg_app = app.handle().clone();
+            let bg_auth = auth.clone();
+            let bg_auth_rotate = auth.clone();
+            let bg_sync_dirty = sync.clone();
+            let bg_app_dirty = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(480));
                 // First tick after 30s startup grace period
@@ -598,10 +667,29 @@ pub fn run() {
                     let changed = bg_client.rotate_all_enabled_accounts().await;
                     if changed && bg_sync.status().signed_in {
                         if let Ok(st) = bg_sync.push_vault().await {
+                            bg_auth_rotate.clear_dirty();
                             let _ = bg_app.emit("agy:sync-updated", &st);
                         }
                     }
                     interval.tick().await;
+                }
+            });
+
+            // Cookie self-heal / imports / label changes mark AuthStore dirty.
+            // Push that state to Cloud Vault promptly, even when the user did
+            // not click an explicit sync button.
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    if !bg_auth.is_dirty() || !bg_sync_dirty.status().signed_in {
+                        continue;
+                    }
+                    if let Ok(st) = bg_sync_dirty.push_vault().await {
+                        bg_auth.clear_dirty();
+                        let _ = bg_app_dirty.emit("agy:sync-updated", &st);
+                    }
                 }
             });
 
@@ -641,6 +729,8 @@ pub fn run() {
             handle_user_interaction,
             cancel_invocation,
             get_model_configs,
+            get_workspace_infos,
+            get_slash_commands,
             get_user_status,
             get_all_accounts_quota,
             rotate_account_cookies,

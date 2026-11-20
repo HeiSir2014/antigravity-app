@@ -1,12 +1,13 @@
 {
   "name": "antigravity-app",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Pure-Native Antigravity Remote Control Tauri v2 App with Claude Mobile Agent UI",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "test": "bun test tests",
     "preview": "vite preview",
     "tauri": "tauri"
   },

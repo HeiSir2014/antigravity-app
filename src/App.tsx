@@ -5,7 +5,9 @@ import {
   cancelInvocation,
   exportVaultJson,
   getModelConfigs,
+  getSlashCommands,
   getTrajectorySteps,
+  getWorkspaceInfos,
   handleUserInteraction,
   harvestLoginCookies,
   importAccountCookies,
@@ -31,6 +33,9 @@ import {
   toggleAccount,
   type SyncStatusInfo,
 } from './api/tauriClient';
+import { buildInteractionPayload } from './api/interactionPayload';
+import { mapClientModelConfigs } from './api/modelConfig';
+import { mapSlashCommands } from './api/slashCommands';
 import { isQuotaLimitError, normalizeTrajectorySteps } from './api/stepNormalizer';
 import { AgentTimeline } from './components/AgentTimeline';
 import { ApprovalBanner } from './components/ApprovalBanner';
@@ -89,6 +94,9 @@ export function App() {
   });
   const [activeModel, setActiveModel] = useState(DEFAULT_MODELS[0].displayName);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>(DEFAULT_MODELS);
+  const [remoteSlashCommands, setRemoteSlashCommands] = useState<
+    Array<{ cmd: string; desc: string }>
+  >([]);
   const edgeTouchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const i18nValue = useMemo(() => {
@@ -144,6 +152,7 @@ export function App() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [sheet, setSheet] = useState<SheetDestination | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
+  const pendingApprovalKeyRef = useRef<string | null>(null);
 
   const hasLiveAccount = useMemo(
     () => accounts.some((a) => !a.id.startsWith('demo-') && a.authenticated && a.enabled),
@@ -183,6 +192,7 @@ export function App() {
 
   const loadSessionTrajectory = useCallback(async (session: UnifiedSessionSummary) => {
     setActiveSession(session);
+    setRemoteSlashCommands([]);
     if (!isTauriRuntime() || session.accountId.startsWith('demo-')) {
       setTimeline(DEMO_TIMELINE);
       setPendingApproval(DEMO_APPROVAL);
@@ -242,34 +252,25 @@ export function App() {
       // Fetch real model configs & quota from the remote machine in background
       void getModelConfigs(session.accountId, session.deviceUuid)
         .then((raw) => {
-          const obj = raw as { clientModelConfigs?: Array<Record<string, unknown>> } | null;
-          const list = obj?.clientModelConfigs;
-          if (Array.isArray(list) && list.length > 0) {
-            const mapped: ModelOption[] = list.map((m, idx) => {
-              const quota = m.quotaInfo as
-                | { remainingFraction?: number; resetTime?: string | { seconds?: number | string } }
-                | undefined;
-              let resetTimeMs: number | undefined;
-              if (typeof quota?.resetTime === 'string') {
-                const parsed = Date.parse(quota.resetTime);
-                if (!Number.isNaN(parsed)) resetTimeMs = parsed;
-              } else if (quota?.resetTime && typeof quota.resetTime === 'object') {
-                const secs = Number(quota.resetTime.seconds);
-                if (!Number.isNaN(secs) && secs > 0) resetTimeMs = secs * 1000;
-              }
-              return {
-                id: String(m.model || m.modelId || `model-${idx}`),
-                displayName: String(m.label || m.displayName || m.model || `Model ${idx + 1}`),
-                description: typeof m.description === 'string' ? m.description : undefined,
-                remainingFraction:
-                  typeof quota?.remainingFraction === 'number' ? quota.remainingFraction : undefined,
-                resetTimeMs,
-                isDefault: Boolean(m.isDefault),
-              };
-            });
+          const mapped = mapClientModelConfigs(raw);
+          if (mapped.length > 0) {
             setAvailableModels(mapped);
+            setActiveModel((prev) => {
+              const existing = mapped.find((m) => m.displayName === prev || m.id === prev);
+              if (existing) return existing.displayName;
+              return (mapped.find((m) => m.isDefault) || mapped[0]).displayName;
+            });
           }
         })
+        .catch(() => {});
+
+      // Prefer the workspace/agent's own slash commands over the built-in
+      // Claude-style fallback list.
+      // Let the backend resolve the default model from GetAvailableModels;
+      // `loadSessionTrajectory` has stable deps and must not capture the
+      // current UI model here.
+      void getSlashCommands(session.accountId, session.deviceUuid, session.cascadeId)
+        .then((raw) => setRemoteSlashCommands(mapSlashCommands(raw)))
         .catch(() => {});
     } catch (err) {
       const errStr = String(err);
@@ -518,7 +519,7 @@ export function App() {
         activeSession.deviceUuid,
         activeSession.cascadeId,
         text,
-        undefined,
+        activeModelOption?.enumModel,
         mediaPayload.length > 0 ? mediaPayload : undefined
       );
       const r = await getTrajectorySteps(
@@ -561,30 +562,21 @@ export function App() {
     }
   };
 
-  const handleApprovalDecision = async (allow: boolean, scope: 'once' | 'session' = 'once') => {
+  const handleApprovalDecision = async (
+    allow: boolean,
+    scope: 'once' | 'session' = 'once',
+    comment?: string
+  ) => {
     if (!pendingApproval || !activeSession) return;
     setIsSubmittingApproval(true);
     try {
       if (isTauriRuntime() && !activeSession.accountId.startsWith('demo-')) {
-        const interactionPayload =
-          pendingApproval.kind === 'runCommand'
-            ? {
-                trajectoryId: pendingApproval.trajectoryId,
-                stepIndex: pendingApproval.stepIndex,
-                runCommand: {
-                  confirm: allow,
-                  proposedCommandLine: pendingApproval.commandOrDiff,
-                  submittedCommandLine: pendingApproval.commandOrDiff,
-                },
-              }
-            : {
-                trajectoryId: pendingApproval.trajectoryId,
-                stepIndex: pendingApproval.stepIndex,
-                permission: {
-                  allow,
-                  scope: scope === 'session' ? 'SESSION' : 'ONCE',
-                },
-              };
+        const interactionPayload = buildInteractionPayload(
+          pendingApproval,
+          allow,
+          scope,
+          comment
+        );
         await handleUserInteraction(
           activeSession.accountId,
           activeSession.deviceUuid,
@@ -597,6 +589,65 @@ export function App() {
       setIsSubmittingApproval(false);
     }
   };
+
+  // Android notification actions are delivered by MainActivity as
+  // `agy:native-event` with `{ event, payload }`. Without this listener the
+  // receiver's Approve/Deny buttons update the notification but never reach
+  // the pending interaction.
+  useEffect(() => {
+    const onNativeEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail as
+        | { event?: string; payload?: { requestId?: string; decision?: string; comment?: string } }
+        | undefined;
+      if (detail?.event !== 'agy:permission-action') return;
+      const requestId = String(detail.payload?.requestId || '');
+      if (requestId && pendingApprovalKeyRef.current && requestId !== pendingApprovalKeyRef.current) {
+        // Stale notification action: the pending approval has already changed.
+        return;
+      }
+      const decision = String(detail.payload?.decision || '');
+      if (!decision) return;
+      void handleApprovalDecision(decision === 'APPROVE', 'once', detail.payload?.comment);
+    };
+    window.addEventListener('agy:native-event', onNativeEvent);
+    return () => window.removeEventListener('agy:native-event', onNativeEvent);
+  }, [pendingApproval, activeSession]);
+
+  // Mirror a pending approval to the Android notification shade while the app
+  // is backgrounded. MainActivity forwards the resulting action back through
+  // the `agy:native-event` listener above.
+  useEffect(() => {
+    if (!pendingApproval) {
+      pendingApprovalKeyRef.current = null;
+      return;
+    }
+    const key = `${pendingApproval.trajectoryId}:${pendingApproval.stepIndex}:${pendingApproval.kind}`;
+    pendingApprovalKeyRef.current = key;
+    const bridge = (
+      window as unknown as {
+        AgyAndroidBridge?: {
+          showPermissionNotification?: (
+            toolName: string,
+            commandText: string,
+            requestId: string
+          ) => boolean;
+        };
+      }
+    ).AgyAndroidBridge;
+    if (!bridge?.showPermissionNotification) return;
+
+    const notify = () => {
+      if (document.visibilityState === 'visible') return;
+      bridge.showPermissionNotification?.(
+        pendingApproval.toolName,
+        pendingApproval.commandOrDiff || pendingApproval.title,
+        key
+      );
+    };
+    notify();
+    document.addEventListener('visibilitychange', notify);
+    return () => document.removeEventListener('visibilitychange', notify);
+  }, [pendingApproval]);
 
   const handleNewSession = async (accountId: string, deviceUuid: string) => {
     const dev = devices.find((d) => d.accountId === accountId && d.uuid === deviceUuid);
@@ -623,7 +674,24 @@ export function App() {
     }
 
     try {
-      const res = await startCascade(accountId, deviceUuid);
+      // StartCascadeRequest has no project_id and expects workspace_uris.
+      // Resolve the paired machine's first workspace so the new cascade is not
+      // created workspace-less.
+      let workspaceUri: string | undefined;
+      try {
+        const rawWorkspaces = (await getWorkspaceInfos(accountId, deviceUuid)) as {
+          workspaceInfos?: Array<{ workspaceUri?: string }>;
+          homeDirUri?: string;
+        } | null;
+        workspaceUri =
+          rawWorkspaces?.workspaceInfos?.find((w) => Boolean(w.workspaceUri))?.workspaceUri ||
+          rawWorkspaces?.homeDirUri ||
+          undefined;
+      } catch {
+        // Fall back to the previous behavior if the machine has no workspace
+        // listing endpoint available.
+      }
+      const res = await startCascade(accountId, deviceUuid, workspaceUri);
       if (res.cascadeId) {
         const created: UnifiedSessionSummary = {
           id: `${accountId}::${deviceUuid}::${res.cascadeId}`,
@@ -1174,6 +1242,7 @@ export function App() {
         <Composer
           permissionMode={permissionMode}
           activeModel={activeModel}
+          serverSlashCommands={remoteSlashCommands}
           isRunning={isRunning}
           hideQuickChips={Boolean(pendingApproval)}
           onSend={(t, atts) => void handleSend(t, atts)}

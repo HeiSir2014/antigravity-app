@@ -1,17 +1,21 @@
+#[cfg(target_os = "macos")]
+use crate::auth::read_webkit_binary_cookies;
 use crate::auth::{AccountRecord, AccountSummary, AuthStore, ANTIGRAVITY_ORIGIN};
 use crate::protocol::wire::{
     decode_list_instances_response, decode_proxy_command_response, encode_grpc_web_frame,
-    encode_proxy_command_request, extract_connect_or_raw_json,
-    DeviceInstance, GrpcWebDecoder, GrpcWebFrame,
+    encode_proxy_command_request, extract_connect_or_raw_json, DeviceInstance, GrpcWebDecoder,
+    GrpcWebFrame,
 };
 use futures_util::{future::join_all, StreamExt};
 use reqwest::header::{
-    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ORIGIN,
+    PRAGMA, REFERER, USER_AGENT,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 
 const LIST_INSTANCES_URL: &str =
@@ -128,6 +132,97 @@ pub struct AntigravityClient {
     cached_api_key: RwLock<Option<String>>,
 }
 
+/// `GetCascadeModelConfigs` is empty on a workspace-runner LS; the current
+/// model catalog is exposed by `GetAvailableModels` under `response.models`
+/// (map keyed by model id) plus `defaultAgentModelId`.
+fn available_models_to_client_configs(raw: &Value) -> Value {
+    let response = raw.get("response").unwrap_or(raw);
+    let models = response
+        .get("models")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let default_id = response
+        .get("defaultAgentModelId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let mut configs = Vec::new();
+    for (id, model) in models {
+        let enum_model = model
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if enum_model.is_empty() {
+            continue;
+        }
+        let label = model
+            .get("displayName")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&id);
+        let description = model
+            .get("description")
+            .and_then(|value| value.as_str())
+            .or_else(|| model.get("tagTitle").and_then(|value| value.as_str()))
+            .unwrap_or("");
+        configs.push(json!({
+            "label": label,
+            "modelOrAlias": { "model": enum_model },
+            "modelId": id,
+            "quotaInfo": model.get("quotaInfo").cloned().unwrap_or(Value::Null),
+            "description": description,
+            // The server marks most catalog entries `recommended`; the real
+            // default is `defaultAgentModelId`.
+            "isRecommended": id == default_id,
+            "isDefault": id == default_id,
+            "disabled": false
+        }));
+    }
+    json!({
+        "clientModelConfigs": configs,
+        "defaultModelId": default_id,
+        "source": "GetAvailableModels"
+    })
+}
+
+fn build_start_cascade_body(workspace_uri: Option<String>) -> Value {
+    let mut body = serde_json::Map::new();
+    if let Some(uri) = workspace_uri {
+        if !uri.is_empty() {
+            body.insert("workspaceUris".to_string(), json!([uri]));
+        }
+    }
+    // StartCascadeRequest has no project_id field (the old cloud AICODE
+    // request did), so never serialize one.
+    Value::Object(body)
+}
+
+fn build_send_user_message_body(
+    cascade_id: &str,
+    text: &str,
+    model: Option<String>,
+    media: Option<Vec<Value>>,
+) -> Value {
+    let mut body = json!({
+        "cascadeId": cascade_id,
+        "items": [{ "text": text }]
+    });
+    if let Some(m_list) = media {
+        if !m_list.is_empty() {
+            body["media"] = Value::Array(m_list);
+        }
+    }
+    if let Some(m) = model {
+        if !m.is_empty() {
+            body["cascadeConfig"] = json!({
+                "plannerConfig": {
+                    "requestedModel": { "model": m }
+                }
+            });
+        }
+    }
+    body
+}
+
 impl AntigravityClient {
     pub fn new(auth: Arc<AuthStore>) -> Self {
         let http = reqwest::Client::builder()
@@ -149,7 +244,12 @@ impl AntigravityClient {
         }
     }
 
-    fn capture_set_cookies(&self, account_id: &str, from_accounts: bool, headers: &HeaderMap) -> bool {
+    fn capture_set_cookies(
+        &self,
+        account_id: &str,
+        from_accounts: bool,
+        headers: &HeaderMap,
+    ) -> bool {
         let set_cookies: Vec<String> = headers
             .get_all(reqwest::header::SET_COOKIE)
             .iter()
@@ -165,24 +265,83 @@ impl AntigravityClient {
     /// Calls Google's `accounts.google.com/RotateCookies` (HFCR 600s keepalive) to refresh
     /// short-lived session cookies (`__Secure-1PSIDTS`, `__Secure-3PSIDTS`, `SIDCC`, `1PSIDCC`, `3PSIDCC`)
     /// and persists any updated `Set-Cookie` values back into `AuthStore`.
+    #[cfg(target_os = "macos")]
+    fn refresh_from_webkit_cookies(&self, account: &AccountRecord) -> Option<AccountRecord> {
+        for bundle_id in ["com.google.antigravity.remoteapp", "antigravity-app"] {
+            // Never let an older browser cookie file overwrite a newer vault.
+            let store_mtime = crate::auth::webkit_cookie_store_mtime_ms(bundle_id);
+            if matches!(store_mtime, Some(mtime) if mtime <= account.updated_at_ms) {
+                continue;
+            }
+            let (google, accounts) = read_webkit_binary_cookies(bundle_id);
+            let has_sapisid = google.contains_key("SAPISID")
+                || google.contains_key("__Secure-1PAPISID")
+                || google.contains_key("__Secure-3PAPISID");
+            let has_sid = google.contains_key("SID")
+                || google.contains_key("__Secure-1PSID")
+                || google.contains_key("__Secure-3PSID");
+            if !has_sapisid || !has_sid {
+                continue;
+            }
+            if self
+                .auth
+                .upsert_account_cookies(
+                    Some(account.id.clone()),
+                    None,
+                    None,
+                    google,
+                    accounts,
+                    None,
+                )
+                .is_ok()
+            {
+                return self.auth.get_account(&account.id);
+            }
+        }
+        None
+    }
+
     pub async fn rotate_cookies_for_account(&self, account_id: &str) -> Result<bool, String> {
         let account = self.resolve_account(account_id)?;
         let Some(cookie_hdr) = account.accounts_cookie_header() else {
             return Ok(false);
         };
+        // Official web sends `[<0..999>,"-<signed 64-bit nonce>"]` and
+        // `x-chrome-id-consistency-request: [1,0]`; a static placeholder body
+        // gets 400/401 and never rotates PSIDTS.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let first = now.subsec_nanos() % 1000;
+        let mixed = (u128::from(now.subsec_nanos()) * 6_364_136_223_846_793_005)
+            ^ u128::from(std::process::id());
+        let nonce = (mixed as u64).wrapping_add(now.as_secs());
+        let body = format!("[{first},\"-{nonce}\"]");
         let resp = self
             .http
             .post(ROTATE_COOKIES_URL)
             .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "*/*")
+            .header(CACHE_CONTROL, "no-cache")
+            .header(PRAGMA, "no-cache")
             .header(ORIGIN, "https://accounts.google.com")
             .header(REFERER, "https://accounts.google.com/RotateCookiesPage")
+            .header("x-chrome-id-consistency-request", "[1,0]")
+            .header(
+                USER_AGENT,
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            )
             .header(COOKIE, cookie_hdr)
-            .body(r#"[000,"-0000000000000000000"]"#)
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("RotateCookies network error: {e}"))?;
 
+        let status = resp.status();
         let changed = self.capture_set_cookies(&account.id, true, resp.headers());
+        if !status.is_success() {
+            return Err(format!("RotateCookies HTTP {status}"));
+        }
         Ok(changed)
     }
 
@@ -233,8 +392,9 @@ impl AntigravityClient {
             .await
             .map_err(|e| format!("Bundle read failed: {e}"))?;
 
-        let key = extract_config_api_key(&js)
-            .ok_or_else(|| "Could not extract public ConfigService.API_KEY from bundle".to_string())?;
+        let key = extract_config_api_key(&js).ok_or_else(|| {
+            "Could not extract public ConfigService.API_KEY from bundle".to_string()
+        })?;
 
         *self
             .cached_api_key
@@ -264,10 +424,19 @@ impl AntigravityClient {
             })?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc-web+proto"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/grpc-web+proto"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/grpc-web+proto"),
+        );
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/grpc-web+proto"),
+        );
         headers.insert("x-grpc-web", HeaderValue::from_static("1"));
-        headers.insert("x-user-agent", HeaderValue::from_static("grpc-web-javascript/0.1"));
+        headers.insert(
+            "x-user-agent",
+            HeaderValue::from_static("grpc-web-javascript/0.1"),
+        );
         headers.insert(
             "x-goog-api-key",
             HeaderValue::from_str(&api_key).map_err(|e| e.to_string())?,
@@ -283,7 +452,10 @@ impl AntigravityClient {
         headers.insert("x-origin", HeaderValue::from_static(ANTIGRAVITY_ORIGIN));
         headers.insert("x-referer", HeaderValue::from_static(ANTIGRAVITY_ORIGIN));
         headers.insert(ORIGIN, HeaderValue::from_static(ANTIGRAVITY_ORIGIN));
-        headers.insert(REFERER, HeaderValue::from_static("https://antigravity.google.com/"));
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://antigravity.google.com/"),
+        );
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&auth_hdr).map_err(|e| e.to_string())?,
@@ -310,9 +482,15 @@ impl AntigravityClient {
             })?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json+protobuf"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json+protobuf"),
+        );
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-        headers.insert("x-user-agent", HeaderValue::from_static("grpc-web-javascript/0.1"));
+        headers.insert(
+            "x-user-agent",
+            HeaderValue::from_static("grpc-web-javascript/0.1"),
+        );
         headers.insert(
             "x-goog-api-key",
             HeaderValue::from_str(&api_key).map_err(|e| e.to_string())?,
@@ -322,7 +500,10 @@ impl AntigravityClient {
             HeaderValue::from_str(&account.auth_user.to_string()).map_err(|e| e.to_string())?,
         );
         headers.insert(ORIGIN, HeaderValue::from_static(ANTIGRAVITY_ORIGIN));
-        headers.insert(REFERER, HeaderValue::from_static("https://antigravity.google.com/"));
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://antigravity.google.com/"),
+        );
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&auth_hdr).map_err(|e| e.to_string())?,
@@ -360,11 +541,22 @@ impl AntigravityClient {
 
             if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
                 // Attempt silent RotateCookies recovery once before reporting SESSION_EXPIRED
-                if matches!(self.rotate_cookies_for_account(&active_account.id).await, Ok(true)) {
+                if matches!(
+                    self.rotate_cookies_for_account(&active_account.id).await,
+                    Ok(true)
+                ) {
                     if let Some(refreshed) = self.auth.get_account(&active_account.id) {
                         active_account = refreshed;
                         continue;
                     }
+                }
+                // The login WebView may have a fresher cookie jar than the
+                // vault (cookies_for_url is unreliable on macOS). Re-import
+                // the WebKit binarycookies and retry once before giving up.
+                #[cfg(target_os = "macos")]
+                if let Some(refreshed) = self.refresh_from_webkit_cookies(&active_account) {
+                    active_account = refreshed;
+                    continue;
                 }
             }
 
@@ -398,7 +590,10 @@ impl AntigravityClient {
         Err("ListInstances failed after retry".to_string())
     }
 
-    pub async fn list_instances(&self, account_id: Option<&str>) -> Result<Vec<DeviceInstance>, String> {
+    pub async fn list_instances(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<DeviceInstance>, String> {
         if let Some(aid) = account_id.filter(|s| !s.is_empty()) {
             let acc = self.resolve_account(aid)?;
             return self.list_instances_for_account(&acc).await;
@@ -408,7 +603,11 @@ impl AntigravityClient {
             .iter()
             .map(|acc| self.list_instances_for_account(acc));
         let results = join_all(futs).await;
-        Ok(results.into_iter().filter_map(|r| r.ok()).flatten().collect())
+        Ok(results
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .flatten()
+            .collect())
     }
 
     pub async fn proxy_unary_json(
@@ -466,11 +665,19 @@ impl AntigravityClient {
 
             if status == reqwest::StatusCode::UNAUTHORIZED && !rotated_on_401 {
                 rotated_on_401 = true;
-                if matches!(self.rotate_cookies_for_account(&active_account.id).await, Ok(true)) {
+                if matches!(
+                    self.rotate_cookies_for_account(&active_account.id).await,
+                    Ok(true)
+                ) {
                     if let Some(refreshed) = self.auth.get_account(&active_account.id) {
                         active_account = refreshed;
                         continue;
                     }
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(refreshed) = self.refresh_from_webkit_cookies(&active_account) {
+                    active_account = refreshed;
+                    continue;
                 }
             }
 
@@ -570,7 +777,9 @@ impl AntigravityClient {
                     let (traj_resp, search_resp) = tokio::join!(traj_fut, search_fut);
 
                     if let Ok(val) = traj_resp {
-                        if let Some(map) = val.get("trajectorySummaries").and_then(|v| v.as_object()) {
+                        if let Some(map) =
+                            val.get("trajectorySummaries").and_then(|v| v.as_object())
+                        {
                             for (cascade_id, item) in map {
                                 let workspace_name = item
                                     .get("workspaces")
@@ -614,15 +823,19 @@ impl AntigravityClient {
                                     .or_else(|| subagent_role.clone())
                                     .or_else(|| subagent_type.clone())
                                     .unwrap_or_else(|| {
-                                        format!("{} ({})", workspace_name, &cascade_id[..cascade_id.len().min(6)])
+                                        format!(
+                                            "{} ({})",
+                                            workspace_name,
+                                            &cascade_id[..cascade_id.len().min(6)]
+                                        )
                                     });
-                                let step_count = item
-                                    .get("stepCount")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0) as u32;
+                                let step_count =
+                                    item.get("stepCount").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as u32;
                                 let last_modified_ms =
                                     parse_proto_timestamp_ms(item.get("lastModifiedTime"));
-                                let raw_status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                                let raw_status =
+                                    item.get("status").and_then(|v| v.as_str()).unwrap_or("");
                                 let status = if raw_status.contains("RUNNING") {
                                     "running"
                                 } else if raw_status.contains("WAITING") {
@@ -635,7 +848,10 @@ impl AntigravityClient {
                                 by_cascade.insert(
                                     cascade_id.clone(),
                                     UnifiedSessionSummary {
-                                        id: format!("{}::{}::{}", acc_ref.id, device.uuid, cascade_id),
+                                        id: format!(
+                                            "{}::{}::{}",
+                                            acc_ref.id, device.uuid, cascade_id
+                                        ),
                                         account_id: acc_ref.id.clone(),
                                         account_label: acc_ref.label.clone(),
                                         cascade_id: cascade_id.clone(),
@@ -696,7 +912,10 @@ impl AntigravityClient {
                                         }
                                     })
                                     .or_insert_with(|| UnifiedSessionSummary {
-                                        id: format!("{}::{}::{}", acc_ref.id, device.uuid, cascade_id),
+                                        id: format!(
+                                            "{}::{}::{}",
+                                            acc_ref.id, device.uuid, cascade_id
+                                        ),
                                         account_id: acc_ref.id.clone(),
                                         account_label: acc_ref.label.clone(),
                                         cascade_id: cascade_id.to_string(),
@@ -804,7 +1023,9 @@ impl AntigravityClient {
                     source_device_name: None,
                     models: Vec::new(),
                     error_code: Some("NO_ONLINE_DEVICE".to_string()),
-                    error_message: Some("No online workstation available to query model quota".to_string()),
+                    error_message: Some(
+                        "No online workstation available to query model quota".to_string(),
+                    ),
                     fetched_at_ms: now,
                 };
             };
@@ -855,18 +1076,22 @@ impl AntigravityClient {
                         .or_else(|| info.get("teamsTier"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    available_prompt_credits = ps
-                        .get("availablePromptCredits")
-                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
-                    monthly_prompt_credits = info
-                        .get("monthlyPromptCredits")
-                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
-                    available_flow_credits = ps
-                        .get("availableFlowCredits")
-                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
-                    monthly_flow_credits = info
-                        .get("monthlyFlowCredits")
-                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                    available_prompt_credits = ps.get("availablePromptCredits").and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
+                    monthly_prompt_credits = info.get("monthlyPromptCredits").and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
+                    available_flow_credits = ps.get("availableFlowCredits").and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
+                    monthly_flow_credits = info.get("monthlyFlowCredits").and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
                 }
                 if let Some(list) = us
                     .get("cascadeModelConfigData")
@@ -949,24 +1174,15 @@ impl AntigravityClient {
         account_id: &str,
         device_uuid: &str,
         workspace_uri: Option<String>,
-        project_id: Option<String>,
+        _project_id: Option<String>,
     ) -> Result<Value, String> {
-        let mut body = serde_json::Map::new();
-        if let Some(uri) = workspace_uri {
-            if !uri.is_empty() {
-                body.insert("workspaceUris".to_string(), json!([uri]));
-            }
-        }
-        if let Some(pid) = project_id {
-            if !pid.is_empty() {
-                body.insert("projectId".to_string(), json!(pid));
-            }
-        }
+        // Keep the project_id parameter for Tauri command compatibility, but
+        // StartCascadeRequest has no such field.
         self.proxy_unary_json(
             account_id,
             device_uuid,
             "/exa.language_server_pb.LanguageServerService/StartCascade",
-            Value::Object(body),
+            build_start_cascade_body(workspace_uri),
         )
         .await
     }
@@ -980,29 +1196,11 @@ impl AntigravityClient {
         model: Option<String>,
         media: Option<Vec<Value>>,
     ) -> Result<Value, String> {
-        let mut body = json!({
-            "cascadeId": cascade_id,
-            "items": [{ "text": text }]
-        });
-        if let Some(m_list) = media {
-            if !m_list.is_empty() {
-                body["media"] = Value::Array(m_list);
-            }
-        }
-        if let Some(m) = model {
-            if !m.is_empty() {
-                body["cascadeConfig"] = json!({
-                    "plannerConfig": {
-                        "requestedModel": { "model": m }
-                    }
-                });
-            }
-        }
         self.proxy_unary_json(
             account_id,
             device_uuid,
             "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage",
-            body,
+            build_send_user_message_body(cascade_id, text, model, media),
         )
         .await
     }
@@ -1060,11 +1258,95 @@ impl AntigravityClient {
         account_id: &str,
         device_uuid: &str,
     ) -> Result<Value, String> {
+        if let Ok(primary) = self
+            .proxy_unary_json(
+                account_id,
+                device_uuid,
+                "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
+                json!({}),
+            )
+            .await
+        {
+            let has_models = primary
+                .get("clientModelConfigs")
+                .and_then(|value| value.as_array())
+                .map(|list| !list.is_empty())
+                .unwrap_or(false);
+            if has_models {
+                return Ok(primary);
+            }
+        }
+        let available = self
+            .proxy_unary_json(
+                account_id,
+                device_uuid,
+                "/exa.language_server_pb.LanguageServerService/GetAvailableModels",
+                json!({ "forceRefresh": true }),
+            )
+            .await?;
+        Ok(available_models_to_client_configs(&available))
+    }
+
+    /// Resolve the workspace URIs of the paired machine. `StartCascadeRequest`
+    /// expects at least one workspace_uri; without it the LS may create a
+    /// workspace-less cascade or reject the request.
+    pub async fn get_workspace_infos(
+        &self,
+        account_id: &str,
+        device_uuid: &str,
+    ) -> Result<Value, String> {
         self.proxy_unary_json(
             account_id,
             device_uuid,
-            "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
+            "/exa.language_server_pb.LanguageServerService/GetWorkspaceInfos",
             json!({}),
+        )
+        .await
+    }
+
+    /// Fetch the slash commands defined by the workspace/agent instead of
+    /// showing the hard-coded fallback list.
+    pub async fn get_slash_commands(
+        &self,
+        account_id: &str,
+        device_uuid: &str,
+        cascade_id: &str,
+        model: Option<String>,
+    ) -> Result<Value, String> {
+        let mut model_enum = model.filter(|value| !value.is_empty());
+        if model_enum.is_none() {
+            if let Ok(configs) = self.get_model_configs(account_id, device_uuid).await {
+                if let Some(list) = configs
+                    .get("clientModelConfigs")
+                    .and_then(|value| value.as_array())
+                {
+                    let chosen = list
+                        .iter()
+                        .find(|item| {
+                            item.get("isRecommended")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false)
+                        })
+                        .or_else(|| list.first());
+                    model_enum = chosen
+                        .and_then(|item| item.get("modelOrAlias"))
+                        .and_then(|value| value.get("model"))
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                }
+            }
+        }
+        let mut body = json!({ "cascadeId": cascade_id });
+        if let Some(model_enum) = model_enum {
+            body["cascadeConfig"] = json!({
+                "plannerConfig": { "requestedModel": { "model": model_enum } }
+            });
+        }
+        self.proxy_unary_json(
+            account_id,
+            device_uuid,
+            "/exa.language_server_pb.LanguageServerService/GetSlashCommands",
+            body,
         )
         .await
     }
@@ -1212,21 +1494,20 @@ fn parse_model_quota_list(list: &[Value]) -> Vec<ModelQuotaItem> {
                 .and_then(|q| q.get("remainingFraction"))
                 .and_then(|v| v.as_f64());
             let reset_val = quota.and_then(|q| q.get("resetTime"));
-            let reset_time_iso = reset_val
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let reset_time_iso = reset_val.and_then(|v| v.as_str()).map(|s| s.to_string());
             let reset_time_ms = {
                 let ms = parse_proto_timestamp_ms(reset_val);
-                if ms > 0 { Some(ms) } else { None }
+                if ms > 0 {
+                    Some(ms)
+                } else {
+                    None
+                }
             };
             let is_default = m
                 .get("isDefault")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let disabled = m
-                .get("disabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let disabled = m.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
 
             ModelQuotaItem {
                 id,
@@ -1401,8 +1682,16 @@ fn b64_encode(input: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(TABLE[((n >> 18) & 63) as usize] as char);
         out.push(TABLE[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { TABLE[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -1429,4 +1718,252 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_cascade_sends_workspace_but_no_project_id() {
+        let body = build_start_cascade_body(Some("file:///workspace".into()));
+        assert_eq!(body["workspaceUris"][0], "file:///workspace");
+        assert!(body.get("projectId").is_none());
+    }
+
+    #[test]
+    fn start_cascade_without_workspace_is_empty() {
+        let body = build_start_cascade_body(None);
+        assert_eq!(body, json!({}));
+    }
+
+    #[test]
+    fn send_message_model_is_nested_under_requested_model() {
+        let body = build_send_user_message_body(
+            "cascade-1",
+            "hello",
+            Some("MODEL_GOOGLE_GEMINI_3_PRO".into()),
+            None,
+        );
+        assert_eq!(
+            body["cascadeConfig"]["plannerConfig"]["requestedModel"]["model"],
+            "MODEL_GOOGLE_GEMINI_3_PRO"
+        );
+    }
+
+    #[test]
+    fn send_message_without_model_omits_cascade_config() {
+        let body = build_send_user_message_body("cascade-1", "hello", None, None);
+        assert!(body.get("cascadeConfig").is_none());
+        assert_eq!(body["items"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn available_models_marks_only_the_server_default() {
+        let raw = json!({
+            "response": {
+                "defaultAgentModelId": "model-b",
+                "models": {
+                    "model-a": { "displayName": "Model A", "model": "MODEL_A", "recommended": true },
+                    "model-b": { "displayName": "Model B", "model": "MODEL_B", "recommended": true }
+                }
+            }
+        });
+        let normalized = available_models_to_client_configs(&raw);
+        let configs = normalized["clientModelConfigs"].as_array().unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(normalized["defaultModelId"], "model-b");
+        let default = configs
+            .iter()
+            .filter(|model| model["isDefault"].as_bool().unwrap_or(false))
+            .collect::<Vec<_>>();
+        assert_eq!(default.len(), 1);
+        assert_eq!(default[0]["modelOrAlias"]["model"], "MODEL_B");
+    }
+
+    #[test]
+    fn send_message_keeps_media_payload() {
+        let body = build_send_user_message_body(
+            "cascade-1",
+            "image",
+            None,
+            Some(vec![
+                json!({ "mimeType": "image/png", "inlineData": "AA==" }),
+            ]),
+        );
+        assert_eq!(body["media"][0]["mimeType"], "image/png");
+    }
+
+    /// Read-only probe against the real local vault. Run explicitly:
+    /// `AGY_LIVE_VAULT_DIR="$HOME/Library/Application Support/com.google.antigravity.remoteapp" \
+    ///  cargo test --lib live_vault_probe -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_vault_probe() {
+        let dir = std::env::var("AGY_LIVE_VAULT_DIR").expect("AGY_LIVE_VAULT_DIR");
+        let auth = Arc::new(AuthStore::new(std::path::PathBuf::from(dir)));
+        let accounts = auth.list_accounts();
+        println!("accounts={}", accounts.len());
+        let account_id = accounts
+            .iter()
+            .filter(|account| account.enabled)
+            .max_by_key(|account| account.updated_at_ms)
+            .map(|account| account.id.clone())
+            .expect("no enabled account in vault");
+
+        let client = AntigravityClient::new(auth.clone());
+        let instances = client
+            .list_instances(Some(&account_id))
+            .await
+            .expect("list_instances failed");
+        println!("instances={}", instances.len());
+        for instance in &instances {
+            println!(
+                "instance status={} version={} supports_chunking={}",
+                instance.status, instance.version, instance.supports_chunking
+            );
+        }
+        let Some(device) = instances.first() else {
+            println!("no paired instance; stop after instance probe");
+            return;
+        };
+
+        match client.rotate_cookies_for_account(&account_id).await {
+            Ok(changed) => println!("rotate_cookies changed={changed}"),
+            Err(error) => println!("rotate_cookies error={error}"),
+        }
+
+        let models = client
+            .get_model_configs(&account_id, &device.uuid)
+            .await
+            .expect("get_model_configs failed");
+        std::fs::write(
+            "/tmp/agy-live-model-configs.json",
+            serde_json::to_vec_pretty(&models).unwrap(),
+        )
+        .unwrap();
+        let configs = models
+            .get("clientModelConfigs")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!("models={}", configs.len());
+        for model in &configs {
+            let label = model
+                .get("label")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let enum_model = model
+                .get("modelOrAlias")
+                .and_then(|value| value.get("model"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            println!("model label={label} enum={enum_model}");
+        }
+        for filter in [true, false] {
+            if let Ok(raw) = client
+                .proxy_unary_json(
+                    &account_id,
+                    &device.uuid,
+                    "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
+                    json!({ "filter": filter }),
+                )
+                .await
+            {
+                let count = raw
+                    .get("clientModelConfigs")
+                    .and_then(|value| value.as_array())
+                    .map(|list| list.len())
+                    .unwrap_or(0);
+                println!("models_filter={filter} count={count}");
+            }
+        }
+        for (method, body) in [
+            ("GetAvailableModels", json!({ "forceRefresh": true })),
+            ("GetModelStatuses", json!({})),
+        ] {
+            match client
+                .proxy_unary_json(
+                    &account_id,
+                    &device.uuid,
+                    &format!("/exa.language_server_pb.LanguageServerService/{method}"),
+                    body,
+                )
+                .await
+            {
+                Ok(raw) => {
+                    std::fs::write(
+                        format!("/tmp/agy-live-{method}.json"),
+                        serde_json::to_vec_pretty(&raw).unwrap(),
+                    )
+                    .unwrap();
+                    let keys = raw
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                    println!("{method} keys={keys:?}");
+                }
+                Err(error) => println!("{method} error={error}"),
+            }
+        }
+
+        let workspaces = client
+            .get_workspace_infos(&account_id, &device.uuid)
+            .await
+            .expect("get_workspace_infos failed");
+        std::fs::write(
+            "/tmp/agy-live-workspaces.json",
+            serde_json::to_vec_pretty(&workspaces).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "workspaces={}",
+            workspaces
+                .get("workspaceInfos")
+                .and_then(|value| value.as_array())
+                .map(|list| list.len())
+                .unwrap_or(0)
+        );
+
+        let sessions = client
+            .list_all_sessions()
+            .await
+            .expect("list_all_sessions failed");
+        println!("sessions={}", sessions.sessions.len());
+        if let Some(session) = sessions
+            .sessions
+            .iter()
+            .find(|session| session.account_id == account_id)
+        {
+            match client
+                .get_slash_commands(&account_id, &session.device_uuid, &session.cascade_id, None)
+                .await
+            {
+                Ok(commands) => {
+                    std::fs::write(
+                        "/tmp/agy-live-slash-commands.json",
+                        serde_json::to_vec_pretty(&commands).unwrap(),
+                    )
+                    .unwrap();
+                    let count = commands
+                        .get("commands")
+                        .and_then(|value| value.as_array())
+                        .map(|list| list.len())
+                        .unwrap_or(0);
+                    println!("slash_commands={count}");
+                    if let Some(list) = commands.get("commands").and_then(|value| value.as_array())
+                    {
+                        for command in list.iter().take(20) {
+                            let name = command
+                                .get("info")
+                                .and_then(|info| info.get("name"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("");
+                            println!("slash name={name}");
+                        }
+                    }
+                }
+                Err(error) => println!("slash_commands_error={error}"),
+            }
+        }
+    }
 }

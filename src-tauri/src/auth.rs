@@ -3,8 +3,171 @@ use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// WebKit's `HTTPStorages/<bundle>.binarycookies` is the cookie store the
+/// Google login window actually writes. Tauri's `cookies_for_url` returns an
+/// empty list for that window on macOS, so use this file as a fallback.
+///
+/// Returns `(google_cookies, accounts_google_cookies)`.
+#[cfg(target_os = "macos")]
+pub fn read_webkit_binary_cookies(
+    bundle_id: &str,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return (HashMap::new(), HashMap::new());
+    };
+    let path = PathBuf::from(home)
+        .join("Library")
+        .join("HTTPStorages")
+        .join(format!("{bundle_id}.binarycookies"));
+    let Ok(data) = fs::read(path) else {
+        return (HashMap::new(), HashMap::new());
+    };
+    parse_webkit_binary_cookies(&data)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_webkit_binary_cookies(data: &[u8]) -> (HashMap<String, String>, HashMap<String, String>) {
+    fn be32(data: &[u8], at: usize) -> Option<u32> {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+    fn le32(data: &[u8], at: usize) -> Option<u32> {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+    fn string(record: &[u8], at: u32) -> Option<String> {
+        let start = at as usize;
+        if start == 0 || start >= record.len() {
+            return None;
+        }
+        let end = record[start..].iter().position(|byte| *byte == 0)? + start;
+        String::from_utf8(record[start..end].to_vec()).ok()
+    }
+    fn google_priority(domain: &str) -> Option<u8> {
+        if domain == "antigravity.google.com" || domain == "google.com" || domain == ".google.com" {
+            Some(0)
+        } else if domain == ".google.com.sg" || domain == "google.com.sg" {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    let mut google: HashMap<String, (u8, String)> = HashMap::new();
+    let mut accounts: HashMap<String, String> = HashMap::new();
+    if data.len() < 8 || &data[..4] != b"cook" {
+        return (HashMap::new(), HashMap::new());
+    }
+    let pages = be32(data, 4).unwrap_or(0) as usize;
+    if pages == 0 || pages > 1024 {
+        return (HashMap::new(), HashMap::new());
+    }
+    let sizes_at = 8;
+    let mut page_start = sizes_at + pages * 4;
+    for page_index in 0..pages {
+        let Some(size) = be32(data, sizes_at + page_index * 4).map(|value| value as usize) else {
+            break;
+        };
+        if page_start + size > data.len() || size < 8 {
+            break;
+        }
+        let page = &data[page_start..page_start + size];
+        page_start += size;
+        if &page[..4] != [0, 0, 1, 0] {
+            continue;
+        }
+        let count = le32(page, 4).unwrap_or(0) as usize;
+        if count > 4096 {
+            continue;
+        }
+        for index in 0..count {
+            let Some(offset) = le32(page, 8 + index * 4).map(|value| value as usize) else {
+                continue;
+            };
+            if offset + 56 > page.len() {
+                continue;
+            }
+            let record = &page[offset..];
+            let Some(record_size) = le32(record, 0).map(|value| value as usize) else {
+                continue;
+            };
+            if record_size < 56 || record_size > record.len() {
+                continue;
+            }
+            let record = &record[..record_size];
+            let Some(domain) = le32(record, 16).and_then(|at| string(record, at)) else {
+                continue;
+            };
+            let Some(name) = le32(record, 20).and_then(|at| string(record, at)) else {
+                continue;
+            };
+            let Some(value) = le32(record, 28).and_then(|at| string(record, at)) else {
+                continue;
+            };
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            if domain == "accounts.google.com" {
+                accounts.entry(name).or_insert(value);
+                continue;
+            }
+            let Some(priority) = google_priority(&domain) else {
+                continue;
+            };
+            match google.get(&name) {
+                Some((current, _)) if *current <= priority => {}
+                _ => {
+                    google.insert(name, (priority, value));
+                }
+            }
+        }
+    }
+    (
+        google
+            .into_iter()
+            .map(|(name, (_, value))| (name, value))
+            .collect(),
+        accounts,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn webkit_cookie_store_mtime_ms(bundle_id: &str) -> Option<u64> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home)
+        .join("Library")
+        .join("HTTPStorages")
+        .join(format!("{bundle_id}.binarycookies"));
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod webkit_cookie_tests {
+    use super::read_webkit_binary_cookies;
+
+    #[test]
+    #[ignore]
+    fn live_webkit_cookie_store_contains_google_auth() {
+        let (google, accounts) = read_webkit_binary_cookies("com.google.antigravity.remoteapp");
+        println!(
+            "google={} accounts={} has_sapisid={} has_sid={}",
+            google.len(),
+            accounts.len(),
+            google.contains_key("SAPISID"),
+            google.contains_key("SID")
+        );
+        assert!(google.contains_key("SAPISID"));
+        assert!(google.contains_key("SID"));
+    }
+}
 
 pub const ANTIGRAVITY_ORIGIN: &str = "https://antigravity.google.com";
 pub const VAULT_SCHEMA_VERSION: &str = "antigravity-vault/v1";
@@ -87,7 +250,10 @@ impl AccountRecord {
         if merged.is_empty() {
             return None;
         }
-        let pairs: Vec<String> = merged.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let pairs: Vec<String> = merged
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
         Some(pairs.join("; "))
     }
 
@@ -157,6 +323,9 @@ impl Default for VaultStoreData {
 pub struct AuthStore {
     vault: RwLock<VaultStoreData>,
     file_path: PathBuf,
+    /// Set whenever persisted cookie state changes; the background sync loop
+    /// pushes it to Cloud Vault and then clears the flag.
+    dirty: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -189,7 +358,9 @@ fn sanitize_cookie_map(raw: HashMap<String, String>) -> HashMap<String, String> 
             // Strip accidental trailing cURL quotes/escapes/whitespace if present
             let vt = v
                 .trim()
-                .split(|c: char| c == '\'' || c == '"' || c == '\\' || c.is_whitespace() || c == ';')
+                .split(|c: char| {
+                    c == '\'' || c == '"' || c == '\\' || c.is_whitespace() || c == ';'
+                })
                 .next()
                 .unwrap_or("");
             if !is_valid_cookie_value(vt) {
@@ -265,8 +436,8 @@ pub fn parse_raw_cookies(raw_input: &str) -> Result<ParsedCookies, String> {
 
     // Format 0: Chrome/Firefox DevTools "Copy as cURL" (-b '...' / -H 'cookie: ...')
     // Detect even if user missed the leading "curl " or copied multi-line cURL
-    let effective_input: String = extract_curl_cookie_payload(trimmed)
-        .unwrap_or_else(|| trimmed.to_string());
+    let effective_input: String =
+        extract_curl_cookie_payload(trimmed).unwrap_or_else(|| trimmed.to_string());
     let trimmed = effective_input.as_str();
 
     // Format 1: JSON array (Cookie-Editor / EditThisCookie) or JSON object map
@@ -382,11 +553,14 @@ impl AuthStore {
         let store = Self {
             vault: RwLock::new(loaded),
             file_path,
+            dirty: AtomicBool::new(false),
         };
         if healed {
             if let Ok(guard) = store.vault.read() {
                 let _ = store.persist_locked(&guard);
             }
+            // Local startup sanitation does not need a Cloud push.
+            store.dirty.store(false, Ordering::Release);
         }
         store
     }
@@ -396,7 +570,19 @@ impl AuthStore {
             let _ = fs::create_dir_all(parent);
         }
         let json = serde_json::to_string_pretty(vault).map_err(|e| e.to_string())?;
-        fs::write(&self.file_path, json).map_err(|e| e.to_string())
+        fs::write(&self.file_path, json).map_err(|e| e.to_string())?;
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// True when the local vault changed since the last successful Cloud push.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Called only after a successful Cloud Vault push.
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Release);
     }
 
     pub fn list_accounts(&self) -> Vec<AccountSummary> {
@@ -515,11 +701,17 @@ impl AuthStore {
             }
             // Skip cookie deletion directives (Max-Age=0 or Expires=1970)
             let lower = raw.to_ascii_lowercase();
-            if lower.contains("max-age=0") || lower.contains("expires=thu, 01-jan-1970") || lower.contains("expires=mon, 01-jan-1990") {
+            if lower.contains("max-age=0")
+                || lower.contains("expires=thu, 01-jan-1970")
+                || lower.contains("expires=mon, 01-jan-1990")
+            {
                 continue;
             }
-            let has_google_domain = lower.contains("domain=.google.com") || lower.contains("domain=google.com");
-            if is_accounts_only_cookie_name(kt) || (from_accounts_domain && !has_google_domain && kt.starts_with("__Host-")) {
+            let has_google_domain =
+                lower.contains("domain=.google.com") || lower.contains("domain=google.com");
+            if is_accounts_only_cookie_name(kt)
+                || (from_accounts_domain && !has_google_domain && kt.starts_with("__Host-"))
+            {
                 updates_accounts.push((kt.to_string(), vt.to_string()));
             } else {
                 updates_google.push((kt.to_string(), vt.to_string()));
@@ -543,7 +735,12 @@ impl AuthStore {
             }
         }
         for (k, v) in updates_accounts {
-            if acc.accounts_cookies.get(&k).map(|old| old != &v).unwrap_or(true) {
+            if acc
+                .accounts_cookies
+                .get(&k)
+                .map(|old| old != &v)
+                .unwrap_or(true)
+            {
                 acc.accounts_cookies.insert(k, v);
                 changed = true;
             }
@@ -557,7 +754,11 @@ impl AuthStore {
         changed
     }
 
-    pub fn toggle_account(&self, account_id: &str, enabled: bool) -> Result<Vec<AccountSummary>, String> {
+    pub fn toggle_account(
+        &self,
+        account_id: &str,
+        enabled: bool,
+    ) -> Result<Vec<AccountSummary>, String> {
         let mut guard = self.vault.write().unwrap_or_else(|e| e.into_inner());
         if let Some(acc) = guard.accounts.iter_mut().find(|a| a.id == account_id) {
             acc.enabled = enabled;
@@ -601,5 +802,36 @@ impl AuthStore {
         guard.updated_at_ms = now_ms();
         self.persist_locked(&guard)?;
         Ok(guard.accounts.iter().map(|a| a.summary()).collect())
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    #[test]
+    fn persisting_cookies_marks_vault_dirty_until_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "agy-auth-dirty-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = AuthStore::new(dir.clone());
+        assert!(!store.is_dirty());
+        store
+            .upsert_account_cookies(
+                None,
+                Some("test".to_string()),
+                None,
+                HashMap::new(),
+                HashMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(store.is_dirty());
+        store.clear_dirty();
+        assert!(!store.is_dirty());
+        let _ = fs::remove_dir_all(dir);
     }
 }

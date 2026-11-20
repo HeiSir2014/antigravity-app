@@ -44,6 +44,7 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     tauriWebView = webView
+    currentWebView = webView
     webView.addJavascriptInterface(AgyAndroidBridge(), "AgyAndroidBridge")
 
     pendingOAuthCallbackUrl?.let { url ->
@@ -100,6 +101,21 @@ class MainActivity : TauriActivity() {
     fun installVerifiedApk(apkPath: String): Boolean {
       return this@MainActivity.installVerifiedApk(apkPath)
     }
+
+    @JavascriptInterface
+    fun showPermissionNotification(toolName: String, commandText: String, requestId: String): Boolean {
+      return try {
+        AGYPermissionActionReceiver.showPermissionNotification(
+          this@MainActivity,
+          toolName,
+          commandText,
+          requestId
+        )
+        true
+      } catch (_: Exception) {
+        false
+      }
+    }
   }
 
   /**
@@ -126,11 +142,29 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  override fun onDestroy() {
+    if (currentWebView === tauriWebView) currentWebView = null
+    super.onDestroy()
+  }
+
   companion object {
+    @Volatile
+    private var currentWebView: WebView? = null
+
     @JvmStatic
     @JvmOverloads
     fun dispatchNativeEventToWebView(eventName: String, payloadJson: String = "") {
-      android.util.Log.i("AntigravityApp", "Notification action: $eventName payload=$payloadJson")
+      val webView = currentWebView ?: return
+      val detail = JSONObject().apply {
+        put("event", eventName)
+        put("payload", runCatching { JSONObject(payloadJson) }.getOrElse { JSONObject() })
+      }
+      webView.post {
+        webView.evaluateJavascript(
+          "window.dispatchEvent(new CustomEvent('agy:native-event', { detail: $detail }));",
+          null
+        )
+      }
     }
   }
 }

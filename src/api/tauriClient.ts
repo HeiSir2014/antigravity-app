@@ -243,6 +243,22 @@ export async function getModelConfigs(accountId: string, deviceUuid: string): Pr
   return invoke('get_model_configs', { accountId, deviceUuid });
 }
 
+export async function getWorkspaceInfos(
+  accountId: string,
+  deviceUuid: string
+): Promise<unknown> {
+  return invoke('get_workspace_infos', { accountId, deviceUuid });
+}
+
+export async function getSlashCommands(
+  accountId: string,
+  deviceUuid: string,
+  cascadeId: string,
+  model?: string
+): Promise<unknown> {
+  return invoke('get_slash_commands', { accountId, deviceUuid, cascadeId, model });
+}
+
 export async function getAllAccountsQuota(): Promise<QuotaDashboardSnapshot> {
   return invoke<QuotaDashboardSnapshot>('get_all_accounts_quota');
 }
