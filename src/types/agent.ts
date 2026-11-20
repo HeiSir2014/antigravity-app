@@ -51,10 +51,53 @@ export interface UnifiedSessionSummary {
   nestingDepth?: number;
 }
 
+export interface AccountFetchError {
+  accountId: string;
+  accountLabel: string;
+  code: 'SESSION_EXPIRED' | 'NETWORK_ERROR' | 'API_ERROR' | string;
+  message: string;
+}
+
 export interface AllSessionsSnapshot {
   accounts: AccountSummary[];
   devices: DeviceInstance[];
   sessions: UnifiedSessionSummary[];
+  accountErrors?: AccountFetchError[];
+}
+
+export interface ModelQuotaItem {
+  id: string;
+  displayName: string;
+  description?: string | null;
+  remainingFraction?: number | null;
+  resetTimeIso?: string | null;
+  resetTimeMs?: number | null;
+  isDefault: boolean;
+  disabled: boolean;
+}
+
+export interface AccountQuotaSnapshot {
+  accountId: string;
+  accountLabel: string;
+  email: string;
+  planName?: string | null;
+  userTier?: string | null;
+  availablePromptCredits?: number | null;
+  monthlyPromptCredits?: number | null;
+  availableFlowCredits?: number | null;
+  monthlyFlowCredits?: number | null;
+  onlineDevices: number;
+  totalDevices: number;
+  sourceDeviceName?: string | null;
+  models: ModelQuotaItem[];
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  fetchedAtMs: number;
+}
+
+export interface QuotaDashboardSnapshot {
+  accounts: AccountQuotaSnapshot[];
+  fetchedAtMs: number;
 }
 
 export type ToolCategory = 'read' | 'search' | 'edit' | 'terminal' | 'browser' | 'mcp' | 'other';
@@ -100,6 +143,7 @@ export interface ModelOption {
   displayName: string;
   description?: string;
   remainingFraction?: number;
+  resetTimeMs?: number;
   isDefault?: boolean;
 }
 
@@ -168,6 +212,9 @@ export type TimelineItem =
       kind: 'error';
       stepIndex: number;
       message: string;
+      isQuotaError?: boolean;
+      errorCode?: string;
+      resetTime?: string;
     };
 
 export type SheetDestination =
@@ -183,6 +230,7 @@ export type SheetDestination =
   | { kind: 'DeviceSessions' }
   | { kind: 'ModelPicker' }
   | { kind: 'SubagentView'; subagent: UnifiedSessionSummary }
+  | { kind: 'QuotaDashboard' }
   | { kind: 'Settings' };
 
 export type AgentStreamEvent =

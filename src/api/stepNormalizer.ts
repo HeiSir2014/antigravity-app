@@ -22,6 +22,79 @@ function asStr(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
+export function isQuotaLimitError(message: string, errorCode?: string): boolean {
+  const combined = `${errorCode || ''} ${message || ''}`.toUpperCase();
+  return (
+    combined.includes('MODEL_QUOTA_LIMIT_EXCEEDED') ||
+    combined.includes('LOW_CREDITS') ||
+    combined.includes('RESOURCE_EXHAUSTED') ||
+    combined.includes('QUOTA_EXCEEDED') ||
+    combined.includes('QUOTA') ||
+    combined.includes('RATE_LIMIT') ||
+    combined.includes('RATE LIMIT') ||
+    combined.includes('USAGE LIMIT') ||
+    combined.includes('LIMIT REACHED') ||
+    combined.includes('OUT OF CREDITS') ||
+    combined.includes('INSUFFICIENT CREDITS') ||
+    combined.includes('HTTP 429') ||
+    combined.includes('TOO MANY REQUESTS') ||
+    combined.includes('用量') ||
+    combined.includes('配额') ||
+    combined.includes('额度')
+  );
+}
+
+interface ExtractedStepError {
+  message: string;
+  errorCode?: string;
+  isQuotaError: boolean;
+  resetTime?: string;
+}
+
+function extractStepError(step: Record<string, unknown>): ExtractedStepError | null {
+  const errMsgWrap = asObj(step.errorMessage);
+  const errObj = asObj(errMsgWrap?.error) || asObj(step.error) || errMsgWrap;
+  if (!errObj) return null;
+
+  const rawCode = errObj.errorCode ?? errObj.code ?? errObj.reason;
+  const errorCode =
+    rawCode === 8 || String(rawCode).toUpperCase().includes('RESOURCE_EXHAUSTED')
+      ? 'RESOURCE_EXHAUSTED'
+      : rawCode != null && String(rawCode).trim() !== ''
+        ? String(rawCode)
+        : undefined;
+
+  // Build message from official Antigravity error fields (userErrorMessage / shortError / fullError / message / structuredErrorParts)
+  let message =
+    asStr(errObj.userErrorMessage) ||
+    asStr(errObj.shortError) ||
+    asStr(errObj.message) ||
+    asStr(errMsgWrap?.userErrorMessage) ||
+    asStr(errMsgWrap?.message) ||
+    asStr(errObj.fullError);
+
+  if (!message && Array.isArray(errObj.structuredErrorParts)) {
+    const parts = errObj.structuredErrorParts
+      .map((p) => {
+        const po = asObj(p);
+        return asStr(po?.text || po?.message);
+      })
+      .filter(Boolean);
+    if (parts.length > 0) message = parts.join(' ');
+  }
+
+  if (!message.trim()) return null;
+
+  // Try to extract reset time string if embedded in error details or text
+  const resetTime =
+    asStr(errObj.resetTime) ||
+    asStr(asObj(errObj.quotaInfo)?.resetTime) ||
+    undefined;
+
+  const isQuotaError = isQuotaLimitError(message, errorCode);
+  return { message: message.trim(), errorCode, isQuotaError, resetTime };
+}
+
 function classifyTool(rawType: string): ToolCategory {
   const t = rawType.toLowerCase();
   if (t.includes('view') || t.includes('read') || t.includes('list_dir')) return 'read';
@@ -81,7 +154,7 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
       return;
     }
 
-    // 2. Planner Response (Thinking + Assistant Markdown)
+    // 2. Planner Response (Thinking + Assistant Markdown + attached Step Error such as Quota Exceeded)
     const planner = asObj(step.plannerResponse);
     if (planner || stepType.includes('PLANNER_RESPONSE')) {
       const thinking = asStr(planner?.thinking || planner?.thought);
@@ -105,6 +178,19 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
           stepIndex: idx,
           markdown: response,
           isStreaming: status === 'running',
+        });
+      }
+      // Official web UI renders step.error on plannerResponse when model hits quota/rate limit or fails
+      const stepErr = extractStepError(step);
+      if (stepErr) {
+        items.push({
+          id: `err-${idx}`,
+          kind: 'error',
+          stepIndex: idx,
+          message: stepErr.message,
+          isQuotaError: stepErr.isQuotaError,
+          errorCode: stepErr.errorCode,
+          resetTime: stepErr.resetTime,
         });
       }
       return;
@@ -234,13 +320,18 @@ export function normalizeTrajectorySteps(rawSteps: unknown[], trajectoryId = '')
       return;
     }
 
-    // 7. Error Step
-    const errObj = asObj(step.errorMessage) || asObj(step.error);
-    if (errObj) {
-      const message = asStr(asObj(errObj.error)?.message || errObj.message || errObj.userErrorMessage);
-      if (message) {
-        items.push({ id: `err-${idx}`, kind: 'error', stepIndex: idx, message });
-      }
+    // 7. Error Step (including MODEL_QUOTA_LIMIT_EXCEEDED / LOW_CREDITS / RESOURCE_EXHAUSTED)
+    const extractedErr = extractStepError(step);
+    if (extractedErr && (step.errorMessage || stepType.includes('ERROR') || status === 'error')) {
+      items.push({
+        id: `err-${idx}`,
+        kind: 'error',
+        stepIndex: idx,
+        message: extractedErr.message,
+        isQuotaError: extractedErr.isQuotaError,
+        errorCode: extractedErr.errorCode,
+        resetTime: extractedErr.resetTime,
+      });
       return;
     }
 

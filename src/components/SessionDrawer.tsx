@@ -1,7 +1,10 @@
 import { useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
+  Gauge,
+  KeyRound,
   Laptop,
   Layers,
   Plus,
@@ -15,6 +18,7 @@ import { useI18n } from '../i18n';
 import { accountColor } from '../utils/colors';
 import type { SyncStatusInfo } from '../api/tauriClient';
 import type {
+  AccountFetchError,
   AccountSummary,
   DeviceInstance,
   SessionViewMode,
@@ -25,6 +29,7 @@ interface SessionDrawerProps {
   open: boolean;
   variant?: 'drawer' | 'sidebar';
   accounts: AccountSummary[];
+  accountErrors?: AccountFetchError[];
   syncStatus?: SyncStatusInfo;
   devices: DeviceInstance[];
   sessions: UnifiedSessionSummary[];
@@ -34,6 +39,7 @@ interface SessionDrawerProps {
   onSelectSession: (session: UnifiedSessionSummary) => void;
   onNewSession: (accountId: string, deviceUuid: string) => void;
   onRefresh: () => void;
+  onOpenQuotaDashboard?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -41,6 +47,7 @@ export function SessionDrawer({
   open,
   variant = 'drawer',
   accounts,
+  accountErrors = [],
   syncStatus,
   devices,
   sessions,
@@ -50,6 +57,7 @@ export function SessionDrawer({
   onSelectSession,
   onNewSession,
   onRefresh,
+  onOpenQuotaDashboard,
   onOpenSettings,
 }: SessionDrawerProps) {
   const { t, formatRelativeTime } = useI18n();
@@ -245,10 +253,25 @@ export function SessionDrawer({
             </div>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {onOpenQuotaDashboard && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (variant === 'drawer') onClose();
+                  onOpenQuotaDashboard();
+                }}
+                title={t('quotaDashboard')}
+                aria-label={t('quotaDashboard')}
+                className="flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 cursor-pointer"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                <Gauge className="w-4 h-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={onRefresh}
-              className="flex items-center justify-center w-10 h-10 rounded-xl active:scale-95 cursor-pointer"
+              className="flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 cursor-pointer"
               style={{ color: 'var(--text-secondary)' }}
             >
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
@@ -256,7 +279,7 @@ export function SessionDrawer({
             <button
               type="button"
               onClick={onClose}
-              className="flex items-center justify-center w-10 h-10 rounded-xl active:scale-95 cursor-pointer"
+              className="flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 cursor-pointer"
               style={{ color: 'var(--text-secondary)' }}
             >
               <X className="w-4.5 h-4.5" />
@@ -413,6 +436,59 @@ export function SessionDrawer({
 
         {/* Session Feed */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+          {accountErrors.length > 0 && (() => {
+            const expired = accountErrors.filter((e) => e.code === 'SESSION_EXPIRED');
+            const isExp = expired.length > 0;
+            const names = (isExp ? expired : accountErrors).map((e) => e.accountLabel).join(', ');
+            return (
+              <div
+                className="mx-1 mb-2 rounded-xl p-2.5 border space-y-2"
+                style={{
+                  background: isExp ? 'rgba(220, 38, 38, 0.08)' : 'rgba(245, 158, 11, 0.1)',
+                  borderColor: isExp ? 'rgba(220, 38, 38, 0.28)' : 'rgba(245, 158, 11, 0.3)',
+                }}
+              >
+                <div className="flex items-start gap-2 text-[0.74rem] leading-snug" style={{ color: isExp ? 'var(--red)' : 'var(--amber)' }}>
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    {isExp
+                      ? t('sessionExpiredBanner', { accounts: names })
+                      : t('networkErrorBanner', { accounts: names })}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {isExp && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (variant === 'drawer') onClose();
+                        onOpenSettings();
+                      }}
+                      className="flex-1 inline-flex items-center justify-center gap-1 h-7.5 px-2 rounded-lg text-[0.72rem] font-semibold cursor-pointer"
+                      style={{ background: 'var(--red)', color: '#fff' }}
+                    >
+                      <KeyRound className="w-3 h-3" />
+                      <span className="truncate">{t('reauthBtn')}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onRefresh}
+                    className="inline-flex items-center justify-center gap-1 h-7.5 px-2.5 rounded-lg text-[0.72rem] font-semibold border cursor-pointer"
+                    style={{
+                      background: 'var(--bg-surface)',
+                      borderColor: 'var(--border-subtle)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
+                    <span>{t('retryBtn')}</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
           {filtered.length === 0 ? (
             <div className="px-3 py-8 text-center text-[0.82rem]" style={{ color: 'var(--text-muted)' }}>
               {t('noSessionsMatch')}

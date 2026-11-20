@@ -6,7 +6,9 @@ mod sync;
 mod updater;
 
 use auth::{parse_raw_cookies, AccountSummary, AuthStore};
-use protocol::client::{AgentStreamEvent, AllSessionsSnapshot, AntigravityClient};
+use protocol::client::{
+    AgentStreamEvent, AllSessionsSnapshot, AntigravityClient, QuotaDashboardSnapshot,
+};
 use protocol::wire::DeviceInstance;
 use sync::{SyncClient, SyncStatusInfo};
 use updater::{ReleaseAssetInfo, UpdateCheckResult, UpdateDownloadEvent};
@@ -48,11 +50,15 @@ async fn import_account_cookies(
     raw_input: String,
     auth_user: Option<u32>,
 ) -> Result<AccountSummary, String> {
-    let cookies = parse_raw_cookies(&raw_input)?;
+    let parsed = parse_raw_cookies(&raw_input)?;
+    let cookies = parsed.google_cookies;
+    let accounts_cookies = parsed.accounts_cookies;
     let has_sapisid = cookies.contains_key("SAPISID")
         || cookies.contains_key("__Secure-3PAPISID")
         || cookies.contains_key("__Secure-1PAPISID");
-    let has_sid = cookies.contains_key("SID") || cookies.contains_key("__Secure-3PSID");
+    let has_sid = cookies.contains_key("SID")
+        || cookies.contains_key("__Secure-1PSID")
+        || cookies.contains_key("__Secure-3PSID");
     if !has_sapisid || !has_sid {
         return Err(
             "Invalid cookies: missing required Google auth tokens (SAPISID / SID). Please export cookies from antigravity.google.com."
@@ -61,9 +67,14 @@ async fn import_account_cookies(
     }
 
     let is_new = account_id.is_none();
-    let summary = state
-        .auth
-        .upsert_account_cookies(account_id, label, email, cookies, auth_user)?;
+    let summary = state.auth.upsert_account_cookies(
+        account_id,
+        label,
+        email,
+        cookies,
+        accounts_cookies,
+        auth_user,
+    )?;
 
     // Verify cookies live against Google Antigravity before committing & syncing to Cloud Vault
     if let Err(err) = state.client.list_instances(Some(&summary.id)).await {
@@ -231,6 +242,10 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                 Ok(u) => u,
                 Err(_) => return,
             };
+            let accounts_url: Url = match "https://accounts.google.com/".parse() {
+                Ok(u) => u,
+                Err(_) => return,
+            };
             for _ in 0..240 {
                 tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 let Some(login_win) = app_handle.get_webview_window("google-login") else {
@@ -254,9 +269,20 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                 let has_sapisid = map.contains_key("SAPISID")
                     || map.contains_key("__Secure-3PAPISID")
                     || map.contains_key("__Secure-1PAPISID");
-                let has_sid = map.contains_key("SID") || map.contains_key("__Secure-3PSID");
+                let has_sid = map.contains_key("SID")
+                    || map.contains_key("__Secure-1PSID")
+                    || map.contains_key("__Secure-3PSID");
                 if !has_sapisid || !has_sid {
                     continue;
+                }
+
+                // Also harvest accounts.google.com host-only cookies (__Host-1PLSID, __Host-3PLSID, LSID)
+                // so our background RotateCookies keepalive can continuously refresh __Secure-1PSIDTS!
+                let mut accounts_map = HashMap::new();
+                if let Ok(acc_cookies) = login_win.cookies_for_url(accounts_url.clone()) {
+                    for c in acc_cookies {
+                        accounts_map.insert(c.name().to_string(), c.value().to_string());
+                    }
                 }
 
                 let state = app_handle.state::<AppState>();
@@ -277,6 +303,7 @@ fn open_google_login(app: AppHandle) -> Result<(), String> {
                     label,
                     sync_email,
                     map,
+                    accounts_map,
                     Some(0),
                 ) {
                     if summary.authenticated {
@@ -320,14 +347,28 @@ fn harvest_login_cookies(
         let url: Url = "https://antigravity.google.com/"
             .parse()
             .map_err(|e| format!("{e}"))?;
+        let accounts_url: Url = "https://accounts.google.com/"
+            .parse()
+            .map_err(|e| format!("{e}"))?;
         let cookies = win.cookies_for_url(url).map_err(|e| e.to_string())?;
         let mut map = HashMap::new();
         for c in cookies {
             map.insert(c.name().to_string(), c.value().to_string());
         }
-        let summary = state
-            .auth
-            .upsert_account_cookies(account_id, label, email, map, auth_user)?;
+        let mut accounts_map = HashMap::new();
+        if let Ok(acc_cookies) = win.cookies_for_url(accounts_url) {
+            for c in acc_cookies {
+                accounts_map.insert(c.name().to_string(), c.value().to_string());
+            }
+        }
+        let summary = state.auth.upsert_account_cookies(
+            account_id,
+            label,
+            email,
+            map,
+            accounts_map,
+            auth_user,
+        )?;
         if summary.authenticated {
             let _ = win.close();
         }
@@ -443,6 +484,32 @@ async fn get_model_configs(
 }
 
 #[tauri::command]
+async fn get_all_accounts_quota(
+    state: State<'_, AppState>,
+) -> Result<QuotaDashboardSnapshot, String> {
+    state.client.get_all_accounts_quota().await
+}
+
+#[tauri::command]
+async fn rotate_account_cookies(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<bool, String> {
+    let changed = if let Some(aid) = account_id.filter(|s| !s.is_empty()) {
+        state.client.rotate_cookies_for_account(&aid).await?
+    } else {
+        state.client.rotate_all_enabled_accounts().await
+    };
+    if changed && state.sync.status().signed_in {
+        if let Ok(st) = state.sync.push_vault().await {
+            let _ = app.emit("agy:sync-updated", &st);
+        }
+    }
+    Ok(changed)
+}
+
+#[tauri::command]
 async fn proxy_raw_rpc(
     state: State<'_, AppState>,
     account_id: String,
@@ -517,6 +584,27 @@ pub fn run() {
             let auth = Arc::new(AuthStore::new(data_dir.clone()));
             let client = Arc::new(AntigravityClient::new(auth.clone()));
             let sync = Arc::new(SyncClient::new(data_dir, auth.clone()));
+
+            // High-availability background Google Cookie HFCR keepalive loop (every 8 min < 600s window)
+            let bg_client = client.clone();
+            let bg_sync = sync.clone();
+            let bg_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(480));
+                // First tick after 30s startup grace period
+                interval.tick().await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                loop {
+                    let changed = bg_client.rotate_all_enabled_accounts().await;
+                    if changed && bg_sync.status().signed_in {
+                        if let Ok(st) = bg_sync.push_vault().await {
+                            let _ = bg_app.emit("agy:sync-updated", &st);
+                        }
+                    }
+                    interval.tick().await;
+                }
+            });
+
             app.manage(AppState {
                 auth,
                 client,
@@ -554,6 +642,8 @@ pub fn run() {
             cancel_invocation,
             get_model_configs,
             get_user_status,
+            get_all_accounts_quota,
+            rotate_account_cookies,
             proxy_raw_rpc,
             stream_agent_state,
             stop_agent_stream

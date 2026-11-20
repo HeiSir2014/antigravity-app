@@ -4,6 +4,7 @@ import type {
   AgentStreamEvent,
   AllSessionsSnapshot,
   DeviceInstance,
+  QuotaDashboardSnapshot,
 } from '../types/agent';
 
 export function isTauriRuntime(): boolean {
@@ -240,6 +241,14 @@ export async function cancelInvocation(
 
 export async function getModelConfigs(accountId: string, deviceUuid: string): Promise<unknown> {
   return invoke('get_model_configs', { accountId, deviceUuid });
+}
+
+export async function getAllAccountsQuota(): Promise<QuotaDashboardSnapshot> {
+  return invoke<QuotaDashboardSnapshot>('get_all_accounts_quota');
+}
+
+export async function rotateAccountCookies(accountId?: string): Promise<boolean> {
+  return invoke<boolean>('rotate_account_cookies', { accountId });
 }
 
 export async function streamAgentState(

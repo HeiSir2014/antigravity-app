@@ -30,6 +30,8 @@ commands.allow = [
   "cancel_invocation",
   "get_model_configs",
   "get_user_status",
+  "get_all_accounts_quota",
+  "rotate_account_cookies",
   "stream_agent_state",
   "stop_agent_stream",
   "proxy_raw_rpc"

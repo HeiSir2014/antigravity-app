@@ -1,4 +1,4 @@
-import { FileDiff, ListChecks, Menu, Settings } from 'lucide-react';
+import { FileDiff, Gauge, ListChecks, Menu, Settings } from 'lucide-react';
 import { useI18n } from '../i18n';
 import type { UnifiedSessionSummary } from '../types/agent';
 
@@ -13,6 +13,7 @@ interface TopBarProps {
   onOpenDevices: () => void;
   onOpenDiff: () => void;
   onOpenTasks: () => void;
+  onOpenQuotaDashboard: () => void;
   onOpenSettings: () => void;
 }
 
@@ -27,6 +28,7 @@ export function TopBar({
   onOpenDevices,
   onOpenDiff,
   onOpenTasks,
+  onOpenQuotaDashboard,
   onOpenSettings,
 }: TopBarProps) {
   const { t } = useI18n();
@@ -121,6 +123,17 @@ export function TopBar({
             <ListChecks className="w-4.5 h-4.5" />
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={onOpenQuotaDashboard}
+          aria-label={t('quotaDashboard')}
+          title={t('quotaDashboard')}
+          className="flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 transition-transform cursor-pointer"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          <Gauge className="w-4.5 h-4.5" />
+        </button>
 
         <button
           type="button"

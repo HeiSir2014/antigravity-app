@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDown,
   Brain,
   Check,
@@ -9,8 +10,10 @@ import {
   Copy,
   FileCode2,
   FileText,
+  Gauge,
   Loader2,
   Search,
+  Sparkles,
   Terminal,
   Wrench,
 } from 'lucide-react';
@@ -570,6 +573,70 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
             }
 
             if (item.kind === 'error') {
+              if (item.isQuotaError) {
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-2xl border p-3.5 space-y-2.5"
+                    style={{
+                      background: 'rgba(245, 158, 11, 0.08)',
+                      borderColor: 'rgba(245, 158, 11, 0.35)',
+                    }}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle
+                        className="w-4.5 h-4.5 shrink-0 mt-0.5"
+                        style={{ color: 'var(--amber)' }}
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[0.86rem] font-bold" style={{ color: 'var(--text-primary)' }}>
+                            {t('quotaLimitReachedTitle')}
+                          </span>
+                          {item.errorCode && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[0.65rem] font-mono font-semibold"
+                              style={{ background: 'rgba(245, 158, 11, 0.16)', color: 'var(--amber)' }}
+                            >
+                              {item.errorCode}
+                            </span>
+                          )}
+                        </div>
+                        <p
+                          className="text-[0.8rem] leading-relaxed whitespace-pre-wrap break-words"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {item.message}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap pl-7">
+                      <button
+                        type="button"
+                        onClick={() => onOpenSheet({ kind: 'ModelPicker' })}
+                        className="inline-flex items-center gap-1.5 px-3 h-8 rounded-xl text-[0.76rem] font-semibold cursor-pointer active:scale-95 transition-transform"
+                        style={{ background: 'var(--accent)', color: '#fff' }}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>{t('switchModelBtn')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenSheet({ kind: 'QuotaDashboard' })}
+                        className="inline-flex items-center gap-1.5 px-3 h-8 rounded-xl text-[0.76rem] font-semibold border cursor-pointer active:scale-95 transition-transform"
+                        style={{
+                          background: 'var(--bg-surface)',
+                          borderColor: 'var(--border-subtle)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        <Gauge className="w-3.5 h-3.5" />
+                        <span>{t('openQuotaDashboardBtn')}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
               return (
                 <div
                   key={item.id}
@@ -581,7 +648,7 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                   }}
                 >
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{item.message}</span>
+                  <span className="break-words">{item.message}</span>
                 </div>
               );
             }

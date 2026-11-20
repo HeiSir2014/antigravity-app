@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Cloud, FileUp, Globe, KeyRound, Sparkles } from 'lucide-react';
+import { AlertTriangle, Cloud, FileUp, Gauge, Globe, KeyRound, RefreshCw, Sparkles } from 'lucide-react';
 import {
   cancelInvocation,
   exportVaultJson,
@@ -31,11 +31,12 @@ import {
   toggleAccount,
   type SyncStatusInfo,
 } from './api/tauriClient';
-import { normalizeTrajectorySteps } from './api/stepNormalizer';
+import { isQuotaLimitError, normalizeTrajectorySteps } from './api/stepNormalizer';
 import { AgentTimeline } from './components/AgentTimeline';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { BottomSheet, type FontSizeMode } from './components/BottomSheet';
 import { Composer } from './components/Composer';
+import { formatResetCountdown, QuotaDashboard } from './components/QuotaDashboard';
 import { SessionDrawer } from './components/SessionDrawer';
 import { TopBar } from './components/TopBar';
 import { createTranslator, I18nContext, resolveLocale, type LocaleCode } from './i18n';
@@ -48,6 +49,7 @@ import {
   DEMO_TIMELINE,
 } from './data/demoSession';
 import type {
+  AccountFetchError,
   AccountSummary,
   DeviceInstance,
   MediaAttachment,
@@ -111,6 +113,7 @@ export function App() {
   const cookieFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [accounts, setAccounts] = useState<AccountSummary[]>(() => (inTauri ? [] : DEMO_ACCOUNTS));
+  const [accountErrors, setAccountErrors] = useState<AccountFetchError[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>({
     serverUrl: 'https://antigravity.yterm.cn',
     signedIn: false,
@@ -153,6 +156,11 @@ export function App() {
         ? sessions.filter((s) => s.parentCascadeId === activeSession.cascadeId)
         : [],
     [sessions, activeSession]
+  );
+
+  const activeModelOption = useMemo(
+    () => availableModels.find((m) => m.displayName === activeModel || m.id === activeModel) || null,
+    [availableModels, activeModel]
   );
 
   useEffect(() => {
@@ -238,13 +246,24 @@ export function App() {
           const list = obj?.clientModelConfigs;
           if (Array.isArray(list) && list.length > 0) {
             const mapped: ModelOption[] = list.map((m, idx) => {
-              const quota = m.quotaInfo as { remainingFraction?: number } | undefined;
+              const quota = m.quotaInfo as
+                | { remainingFraction?: number; resetTime?: string | { seconds?: number | string } }
+                | undefined;
+              let resetTimeMs: number | undefined;
+              if (typeof quota?.resetTime === 'string') {
+                const parsed = Date.parse(quota.resetTime);
+                if (!Number.isNaN(parsed)) resetTimeMs = parsed;
+              } else if (quota?.resetTime && typeof quota.resetTime === 'object') {
+                const secs = Number(quota.resetTime.seconds);
+                if (!Number.isNaN(secs) && secs > 0) resetTimeMs = secs * 1000;
+              }
               return {
                 id: String(m.model || m.modelId || `model-${idx}`),
                 displayName: String(m.label || m.displayName || m.model || `Model ${idx + 1}`),
                 description: typeof m.description === 'string' ? m.description : undefined,
                 remainingFraction:
                   typeof quota?.remainingFraction === 'number' ? quota.remainingFraction : undefined,
+                resetTimeMs,
                 isDefault: Boolean(m.isDefault),
               };
             });
@@ -288,6 +307,24 @@ export function App() {
             setIsRunning(norm.isRunning);
           })
           .catch(() => {});
+      } else if (evt.kind === 'error') {
+        setIsLiveConnected(false);
+        if (evt.message.includes('SESSION_EXPIRED')) {
+          setAccountErrors((prev) => {
+            if (prev.some((e) => e.accountId === session.accountId && e.code === 'SESSION_EXPIRED')) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                accountId: session.accountId,
+                accountLabel: session.accountLabel,
+                code: 'SESSION_EXPIRED',
+                message: evt.message,
+              },
+            ];
+          });
+        }
       } else if (evt.kind === 'closed') {
         setIsLiveConnected(false);
       }
@@ -316,18 +353,26 @@ export function App() {
       }
 
       const snapshot = await listAllSessions();
+      const errs = snapshot.accountErrors || [];
       setAccounts(snapshot.accounts);
-      setDevices(snapshot.devices);
-      setSessions(snapshot.sessions);
-      const rootSessions = snapshot.sessions.filter(
-        (s) => !s.parentCascadeId && !(s.nestingDepth && s.nestingDepth > 0)
-      );
-      if (rootSessions.length > 0) {
-        if (!activeSession || activeSession.accountId.startsWith('demo-')) {
-          void loadSessionTrajectory(rootSessions[0]);
+      setAccountErrors(errs);
+
+      // High-availability guard: on transient network errors with 0 returned devices, preserve last-known list
+      const onlyNetworkErrors =
+        errs.length > 0 && errs.every((e) => e.code === 'NETWORK_ERROR');
+      if (snapshot.devices.length > 0 || !onlyNetworkErrors) {
+        setDevices(snapshot.devices);
+        setSessions(snapshot.sessions);
+        const rootSessions = snapshot.sessions.filter(
+          (s) => !s.parentCascadeId && !(s.nestingDepth && s.nestingDepth > 0)
+        );
+        if (rootSessions.length > 0) {
+          if (!activeSession || activeSession.accountId.startsWith('demo-')) {
+            void loadSessionTrajectory(rootSessions[0]);
+          }
+        } else if (errs.length === 0) {
+          setActiveSession(null);
         }
-      } else {
-        setActiveSession(null);
       }
     } catch (err) {
       setOnboardingMsg(String(err));
@@ -414,7 +459,20 @@ export function App() {
       });
     }
 
+    const handleWakeRefresh = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshLiveSessions();
+      }
+    };
+    const handleOnlineRefresh = () => {
+      void refreshLiveSessions();
+    };
+    document.addEventListener('visibilitychange', handleWakeRefresh);
+    window.addEventListener('online', handleOnlineRefresh);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleWakeRefresh);
+      window.removeEventListener('online', handleOnlineRefresh);
       window.removeEventListener('agy:oauth-callback', handleAndroidOAuthCallback);
       if (unlistenCaptured) unlistenCaptured();
       if (unlistenSync) unlistenSync();
@@ -475,9 +533,18 @@ export function App() {
       setIsRunning(norm.isRunning);
     } catch (err) {
       setIsRunning(false);
+      const msg = String(err);
+      const quotaErr = isQuotaLimitError(msg);
       setTimeline((prev) => [
         ...prev,
-        { id: `send-err-${Date.now()}`, kind: 'error', stepIndex: prev.length, message: String(err) },
+        {
+          id: `send-err-${Date.now()}`,
+          kind: 'error',
+          stepIndex: prev.length,
+          message: msg,
+          isQuotaError: quotaErr,
+          errorCode: quotaErr ? 'MODEL_QUOTA_LIMIT_EXCEEDED' : undefined,
+        },
       ]);
     }
   };
@@ -632,6 +699,7 @@ export function App() {
               open
               variant="sidebar"
               accounts={accounts}
+              accountErrors={accountErrors}
               syncStatus={syncStatus}
               devices={devices}
               sessions={sessions}
@@ -641,6 +709,7 @@ export function App() {
               onSelectSession={(s) => void loadSessionTrajectory(s)}
               onNewSession={(accId, devUuid) => void handleNewSession(accId, devUuid)}
               onRefresh={() => void refreshLiveSessions()}
+              onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
               onOpenSettings={() => setSheet({ kind: 'Settings' })}
             />
           </div>
@@ -682,8 +751,60 @@ export function App() {
           });
         }}
         onOpenTasks={() => setSheet({ kind: 'TaskList', tasks })}
+        onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
         onOpenSettings={() => setSheet({ kind: 'Settings' })}
       />
+
+      {accountErrors.length > 0 && !(inTauri && !hasLiveAccount && !demoMode) && (() => {
+        const expired = accountErrors.filter((e) => e.code === 'SESSION_EXPIRED');
+        const isExp = expired.length > 0;
+        const names = (isExp ? expired : accountErrors).map((e) => e.accountLabel).join(', ');
+        return (
+          <div
+            className="shrink-0 border-b px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[0.78rem]"
+            style={{
+              background: isExp ? 'rgba(220, 38, 38, 0.09)' : 'rgba(245, 158, 11, 0.1)',
+              borderColor: isExp ? 'rgba(220, 38, 38, 0.25)' : 'rgba(245, 158, 11, 0.28)',
+              color: isExp ? 'var(--red)' : 'var(--amber)',
+            }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span className="leading-snug">
+                {isExp
+                  ? i18nValue.t('sessionExpiredBanner', { accounts: names })
+                  : i18nValue.t('networkErrorBanner', { accounts: names })}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {isExp && (
+                <button
+                  type="button"
+                  onClick={() => setSheet({ kind: 'Settings' })}
+                  className="inline-flex items-center gap-1 px-2.5 h-7 rounded-lg text-[0.73rem] font-semibold cursor-pointer"
+                  style={{ background: 'var(--red)', color: '#fff' }}
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>{i18nValue.t('reauthBtn')}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void refreshLiveSessions()}
+                className="inline-flex items-center gap-1 px-2.5 h-7 rounded-lg text-[0.73rem] font-semibold border cursor-pointer"
+                style={{
+                  background: 'var(--bg-surface)',
+                  borderColor: 'var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <RefreshCw className={`w-3 h-3 ${isLoadingSessions ? 'animate-spin' : ''}`} />
+                <span>{i18nValue.t('retryBtn')}</span>
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {inTauri && !hasLiveAccount && !demoMode ? (
         <main className="flex-1 overflow-y-auto px-4 py-6 sm:py-10 flex flex-col">
@@ -1001,6 +1122,54 @@ export function App() {
         />
       )}
 
+      {!(inTauri && !hasLiveAccount && !demoMode) &&
+        activeModelOption &&
+        typeof activeModelOption.remainingFraction === 'number' &&
+        activeModelOption.remainingFraction <= 0.001 && (
+          <div
+            className="shrink-0 mx-3 md:mx-auto md:max-w-3xl w-[calc(100%-1.5rem)] mb-1.5 rounded-2xl border px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[0.77rem]"
+            style={{
+              background: 'rgba(245, 158, 11, 0.09)',
+              borderColor: 'rgba(245, 158, 11, 0.32)',
+            }}
+          >
+            <div className="flex items-center gap-2 min-w-0" style={{ color: 'var(--amber)' }}>
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span className="truncate font-medium">
+                {i18nValue.t('modelExhaustedInline', {
+                  model: activeModelOption.displayName,
+                  reset: activeModelOption.resetTimeMs
+                    ? ` (${i18nValue.t('quotaResetIn', { time: formatResetCountdown(activeModelOption.resetTimeMs) })})`
+                    : '',
+                })}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setSheet({ kind: 'ModelPicker' })}
+                className="px-2.5 h-7 rounded-lg text-[0.72rem] font-semibold cursor-pointer"
+                style={{ background: 'var(--accent)', color: '#fff' }}
+              >
+                {i18nValue.t('switchModelBtn')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSheet({ kind: 'QuotaDashboard' })}
+                className="inline-flex items-center gap-1 px-2.5 h-7 rounded-lg text-[0.72rem] font-semibold border cursor-pointer"
+                style={{
+                  background: 'var(--bg-surface)',
+                  borderColor: 'var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <Gauge className="w-3 h-3" />
+                <span>{i18nValue.t('quotaDashboard')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
       {!(inTauri && !hasLiveAccount && !demoMode) && (
         <Composer
           permissionMode={permissionMode}
@@ -1017,6 +1186,7 @@ export function App() {
       <SessionDrawer
         open={drawerOpen}
         accounts={accounts}
+        accountErrors={accountErrors}
         syncStatus={syncStatus}
         devices={devices}
         sessions={sessions}
@@ -1026,11 +1196,20 @@ export function App() {
         onSelectSession={(s) => void loadSessionTrajectory(s)}
         onNewSession={(accId, devUuid) => void handleNewSession(accId, devUuid)}
         onRefresh={() => void refreshLiveSessions()}
+        onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
         onOpenSettings={() => setSheet({ kind: 'Settings' })}
       />
 
+      <QuotaDashboard
+        open={sheet?.kind === 'QuotaDashboard'}
+        demoMode={demoMode}
+        accounts={accounts}
+        onClose={() => setSheet(null)}
+        onOpenAccountSettings={() => setSheet({ kind: 'Settings' })}
+      />
+
       <BottomSheet
-        sheet={sheet}
+        sheet={sheet?.kind === 'QuotaDashboard' ? null : sheet}
         accounts={accounts}
         syncStatus={syncStatus}
         theme={theme}

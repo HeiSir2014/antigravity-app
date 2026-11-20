@@ -18,9 +18,61 @@ const LIST_INSTANCES_URL: &str =
     "https://antigravity.google.com/$rpc/devtools_jetski_boq_api_proto.ApiService/ListInstances";
 const PROXY_COMMAND_URL: &str =
     "https://antigravity.google.com/$rpc/devtools_jetski_boq_api_proto.ApiService/ProxyCommand";
+#[allow(dead_code)]
 const STREAM_PROXY_COMMAND_URL: &str =
     "https://antigravity.google.com/$rpc/devtools_jetski_boq_api_proto.ApiService/StreamProxyCommand";
 const REMOTE_BOOTSTRAP_URL: &str = "https://antigravity.google.com/remote";
+const ROTATE_COOKIES_URL: &str = "https://accounts.google.com/RotateCookies";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFetchError {
+    pub account_id: String,
+    pub account_label: String,
+    pub code: String, // "SESSION_EXPIRED" | "NETWORK_ERROR" | "API_ERROR"
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelQuotaItem {
+    pub id: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub remaining_fraction: Option<f64>,
+    pub reset_time_iso: Option<String>,
+    pub reset_time_ms: Option<u64>,
+    pub is_default: bool,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaSnapshot {
+    pub account_id: String,
+    pub account_label: String,
+    pub email: String,
+    pub plan_name: Option<String>,
+    pub user_tier: Option<String>,
+    pub available_prompt_credits: Option<i64>,
+    pub monthly_prompt_credits: Option<i64>,
+    pub available_flow_credits: Option<i64>,
+    pub monthly_flow_credits: Option<i64>,
+    pub online_devices: usize,
+    pub total_devices: usize,
+    pub source_device_name: Option<String>,
+    pub models: Vec<ModelQuotaItem>,
+    pub error_code: Option<String>, // "SESSION_EXPIRED" | "NO_ONLINE_DEVICE" | "NETWORK_ERROR" | "API_ERROR"
+    pub error_message: Option<String>,
+    pub fetched_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaDashboardSnapshot {
+    pub accounts: Vec<AccountQuotaSnapshot>,
+    pub fetched_at_ms: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +102,7 @@ pub struct AllSessionsSnapshot {
     pub accounts: Vec<AccountSummary>,
     pub devices: Vec<DeviceInstance>,
     pub sessions: Vec<UnifiedSessionSummary>,
+    pub account_errors: Vec<AccountFetchError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +132,9 @@ impl AntigravityClient {
     pub fn new(auth: Arc<AuthStore>) -> Self {
         let http = reqwest::Client::builder()
             .use_rustls_tls()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(45))
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
             .build()
             .expect("Failed to build reqwest client");
@@ -91,6 +147,56 @@ impl AntigravityClient {
             auth,
             cached_api_key: RwLock::new(env_key),
         }
+    }
+
+    fn capture_set_cookies(&self, account_id: &str, from_accounts: bool, headers: &HeaderMap) -> bool {
+        let set_cookies: Vec<String> = headers
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect();
+        if set_cookies.is_empty() {
+            return false;
+        }
+        self.auth
+            .merge_set_cookies(account_id, from_accounts, &set_cookies)
+    }
+
+    /// Calls Google's `accounts.google.com/RotateCookies` (HFCR 600s keepalive) to refresh
+    /// short-lived session cookies (`__Secure-1PSIDTS`, `__Secure-3PSIDTS`, `SIDCC`, `1PSIDCC`, `3PSIDCC`)
+    /// and persists any updated `Set-Cookie` values back into `AuthStore`.
+    pub async fn rotate_cookies_for_account(&self, account_id: &str) -> Result<bool, String> {
+        let account = self.resolve_account(account_id)?;
+        let Some(cookie_hdr) = account.accounts_cookie_header() else {
+            return Ok(false);
+        };
+        let resp = self
+            .http
+            .post(ROTATE_COOKIES_URL)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ORIGIN, "https://accounts.google.com")
+            .header(REFERER, "https://accounts.google.com/RotateCookiesPage")
+            .header(COOKIE, cookie_hdr)
+            .body(r#"[000,"-0000000000000000000"]"#)
+            .send()
+            .await
+            .map_err(|e| format!("RotateCookies network error: {e}"))?;
+
+        let changed = self.capture_set_cookies(&account.id, true, resp.headers());
+        Ok(changed)
+    }
+
+    /// Rotates cookies for all enabled authenticated accounts. Returns true if any account's cookies updated.
+    pub async fn rotate_all_enabled_accounts(&self) -> bool {
+        let accounts = self.auth.enabled_authenticated_accounts();
+        if accounts.is_empty() {
+            return false;
+        }
+        let futs = accounts
+            .iter()
+            .map(|acc| self.rotate_cookies_for_account(&acc.id));
+        let results = join_all(futs).await;
+        results.into_iter().any(|r| matches!(r, Ok(true)))
     }
 
     /// Dynamically discovers the public web client API key from antigravity.google.com's boq-jetski bundle
@@ -232,49 +338,64 @@ impl AntigravityClient {
         &self,
         account: &AccountRecord,
     ) -> Result<Vec<DeviceInstance>, String> {
-        let headers = self.build_jspb_headers_for(account).await?;
+        let mut active_account = account.clone();
+        for attempt in 0..2 {
+            let headers = self.build_jspb_headers_for(&active_account).await?;
 
-        let resp = self
-            .http
-            .post(LIST_INSTANCES_URL)
-            .headers(headers)
-            .body("[]")
-            .send()
-            .await
-            .map_err(|e| format!("ListInstances network error: {e}"))?;
+            let resp = self
+                .http
+                .post(LIST_INSTANCES_URL)
+                .headers(headers)
+                .body("[]")
+                .send()
+                .await
+                .map_err(|e| format!("ListInstances network error: {e}"))?;
 
-        let status = resp.status();
-        let raw_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("ListInstances read error: {e}"))?;
+            let status = resp.status();
+            let _ = self.capture_set_cookies(&active_account.id, false, resp.headers());
+            let raw_bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("ListInstances read error: {e}"))?;
 
-        if !status.is_success() {
-            let err_preview = String::from_utf8_lossy(&raw_bytes);
-            let short: String = err_preview.chars().take(180).collect();
-            return Err(format!("ListInstances HTTP {status}: {short}"));
-        }
-
-        // Parse Google JSPB array response: [[ [uuid, [name, version, chunking], status, [sec, nanos]], ... ]]
-        let mut list = if let Ok(val) = serde_json::from_slice::<Value>(&raw_bytes) {
-            parse_jspb_instances(&val)
-        } else {
-            let mut decoder = GrpcWebDecoder::default();
-            let frames = decoder.push(&raw_bytes);
-            let mut data_payload: Option<Vec<u8>> = None;
-            for frame in frames {
-                if let GrpcWebFrame::Data(d) = frame {
-                    data_payload = Some(d);
+            if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                // Attempt silent RotateCookies recovery once before reporting SESSION_EXPIRED
+                if matches!(self.rotate_cookies_for_account(&active_account.id).await, Ok(true)) {
+                    if let Some(refreshed) = self.auth.get_account(&active_account.id) {
+                        active_account = refreshed;
+                        continue;
+                    }
                 }
             }
-            decode_list_instances_response(&data_payload.unwrap_or_default())?
-        };
 
-        for d in &mut list {
-            d.account_id = account.id.clone();
-            d.account_label = account.label.clone();
+            if !status.is_success() {
+                let err_preview = String::from_utf8_lossy(&raw_bytes);
+                let short: String = err_preview.chars().take(240).collect();
+                return Err(format!("ListInstances HTTP {status}: {short}"));
+            }
+
+            // Parse Google JSPB array response: [[ [uuid, [name, version, chunking], status, [sec, nanos]], ... ]]
+            let mut list = if let Ok(val) = serde_json::from_slice::<Value>(&raw_bytes) {
+                parse_jspb_instances(&val)
+            } else {
+                let mut decoder = GrpcWebDecoder::default();
+                let frames = decoder.push(&raw_bytes);
+                let mut data_payload: Option<Vec<u8>> = None;
+                for frame in frames {
+                    if let GrpcWebFrame::Data(d) = frame {
+                        data_payload = Some(d);
+                    }
+                }
+                decode_list_instances_response(&data_payload.unwrap_or_default())?
+            };
+
+            for d in &mut list {
+                d.account_id = active_account.id.clone();
+                d.account_label = active_account.label.clone();
+            }
+            return Ok(list);
         }
-        Ok(list)
+        Err("ListInstances failed after retry".to_string())
     }
 
     pub async fn list_instances(&self, account_id: Option<&str>) -> Result<Vec<DeviceInstance>, String> {
@@ -309,7 +430,7 @@ impl AntigravityClient {
         rpc_path: &str,
         request_json: Value,
     ) -> Result<Value, String> {
-        let headers = self.build_jspb_headers_for(account).await?;
+        let mut active_account = account.clone();
         let json_bytes = serde_json::to_vec(&request_json).map_err(|e| e.to_string())?;
         let b64_payload = b64_encode(&json_bytes);
         let jspb_body = serde_json::to_string(&json!([
@@ -324,25 +445,38 @@ impl AntigravityClient {
         let url = format!("{PROXY_COMMAND_URL}?$unique={method_name}");
 
         let mut last_err = String::new();
+        let mut rotated_on_401 = false;
         for attempt in 0..3 {
+            let headers = self.build_jspb_headers_for(&active_account).await?;
             let resp = self
                 .http
                 .post(&url)
-                .headers(headers.clone())
+                .headers(headers)
                 .body(jspb_body.clone())
                 .send()
                 .await
                 .map_err(|e| format!("ProxyCommand({method_name}) network error: {e}"))?;
 
             let status = resp.status();
+            let _ = self.capture_set_cookies(&active_account.id, false, resp.headers());
             let raw_bytes = resp
                 .bytes()
                 .await
                 .map_err(|e| format!("ProxyCommand({method_name}) read error: {e}"))?;
 
+            if status == reqwest::StatusCode::UNAUTHORIZED && !rotated_on_401 {
+                rotated_on_401 = true;
+                if matches!(self.rotate_cookies_for_account(&active_account.id).await, Ok(true)) {
+                    if let Some(refreshed) = self.auth.get_account(&active_account.id) {
+                        active_account = refreshed;
+                        continue;
+                    }
+                }
+            }
+
             if !status.is_success() {
                 let preview = String::from_utf8_lossy(&raw_bytes);
-                let short: String = preview.chars().take(180).collect();
+                let short: String = preview.chars().take(240).collect();
                 last_err = format!("ProxyCommand({method_name}) HTTP {status}: {short}");
                 if preview.contains("TUNNEL_UNAVAILABLE") && attempt < 2 {
                     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
@@ -386,15 +520,28 @@ impl AntigravityClient {
     }
 
     /// Fans out ListInstances + SearchConversations concurrently across ALL enabled accounts & online devices!
+    /// Never silently swallows auth/network errors — returns per-account `account_errors` for UI recovery.
     pub async fn list_all_sessions(&self) -> Result<AllSessionsSnapshot, String> {
         let account_summaries = self.auth.list_accounts();
         let enabled_accounts = self.auth.enabled_authenticated_accounts();
 
         let per_account_futs = enabled_accounts.into_iter().map(|account| async move {
-            let devices = self
-                .list_instances_for_account(&account)
-                .await
-                .unwrap_or_default();
+            let devices = match self.list_instances_for_account(&account).await {
+                Ok(devs) => devs,
+                Err(err) => {
+                    let code = classify_account_error(&err).to_string();
+                    return (
+                        Vec::new(),
+                        Vec::new(),
+                        Some(AccountFetchError {
+                            account_id: account.id.clone(),
+                            account_label: account.label.clone(),
+                            code,
+                            message: err,
+                        }),
+                    );
+                }
+            };
             let online: Vec<DeviceInstance> = devices
                 .iter()
                 .filter(|d| d.status == "RUNNING" || d.status == "IDLE")
@@ -577,15 +724,19 @@ impl AntigravityClient {
 
             let sessions: Vec<UnifiedSessionSummary> =
                 join_all(device_futs).await.into_iter().flatten().collect();
-            (devices, sessions)
+            (devices, sessions, None)
         });
 
         let aggregated = join_all(per_account_futs).await;
         let mut all_devices = Vec::new();
         let mut all_sessions = Vec::new();
-        for (devs, sess) in aggregated {
+        let mut all_errors = Vec::new();
+        for (devs, sess, err_opt) in aggregated {
             all_devices.extend(devs);
             all_sessions.extend(sess);
+            if let Some(err) = err_opt {
+                all_errors.push(err);
+            }
         }
         all_sessions.sort_by(|a, b| b.last_modified_ms.cmp(&a.last_modified_ms));
 
@@ -593,6 +744,184 @@ impl AntigravityClient {
             accounts: account_summaries,
             devices: all_devices,
             sessions: all_sessions,
+            account_errors: all_errors,
+        })
+    }
+
+    /// Fetches real-time multi-account quota & usage across ALL enabled accounts in parallel.
+    pub async fn get_all_accounts_quota(&self) -> Result<QuotaDashboardSnapshot, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let enabled_accounts = self.auth.enabled_authenticated_accounts();
+
+        let futs = enabled_accounts.into_iter().map(|account| async move {
+            let devices = match self.list_instances_for_account(&account).await {
+                Ok(d) => d,
+                Err(err) => {
+                    return AccountQuotaSnapshot {
+                        account_id: account.id.clone(),
+                        account_label: account.label.clone(),
+                        email: account.email.clone(),
+                        plan_name: None,
+                        user_tier: None,
+                        available_prompt_credits: None,
+                        monthly_prompt_credits: None,
+                        available_flow_credits: None,
+                        monthly_flow_credits: None,
+                        online_devices: 0,
+                        total_devices: 0,
+                        source_device_name: None,
+                        models: Vec::new(),
+                        error_code: Some(classify_account_error(&err).to_string()),
+                        error_message: Some(err),
+                        fetched_at_ms: now,
+                    };
+                }
+            };
+
+            let total_devices = devices.len();
+            let online: Vec<&DeviceInstance> = devices
+                .iter()
+                .filter(|d| d.status == "RUNNING" || d.status == "IDLE")
+                .collect();
+            let online_devices = online.len();
+
+            let Some(primary_dev) = online.first() else {
+                return AccountQuotaSnapshot {
+                    account_id: account.id.clone(),
+                    account_label: account.label.clone(),
+                    email: account.email.clone(),
+                    plan_name: None,
+                    user_tier: None,
+                    available_prompt_credits: None,
+                    monthly_prompt_credits: None,
+                    available_flow_credits: None,
+                    monthly_flow_credits: None,
+                    online_devices: 0,
+                    total_devices,
+                    source_device_name: None,
+                    models: Vec::new(),
+                    error_code: Some("NO_ONLINE_DEVICE".to_string()),
+                    error_message: Some("No online workstation available to query model quota".to_string()),
+                    fetched_at_ms: now,
+                };
+            };
+
+            let user_fut = self.proxy_unary_json_with_account(
+                &account,
+                &primary_dev.uuid,
+                "/exa.language_server_pb.LanguageServerService/GetUserStatus",
+                json!({}),
+            );
+            let models_fut = self.proxy_unary_json_with_account(
+                &account,
+                &primary_dev.uuid,
+                "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
+                json!({}),
+            );
+            let (user_res, models_res) = tokio::join!(user_fut, models_fut);
+
+            let mut email = account.email.clone();
+            let mut plan_name: Option<String> = None;
+            let mut user_tier: Option<String> = None;
+            let mut available_prompt_credits: Option<i64> = None;
+            let mut monthly_prompt_credits: Option<i64> = None;
+            let mut available_flow_credits: Option<i64> = None;
+            let mut monthly_flow_credits: Option<i64> = None;
+            let mut models: Vec<ModelQuotaItem> = Vec::new();
+            let mut err_code: Option<String> = None;
+            let mut err_msg: Option<String> = None;
+
+            if let Ok(ref uval) = user_res {
+                let us = uval.get("userStatus").unwrap_or(uval);
+                if email.is_empty() {
+                    if let Some(em) = us.get("email").and_then(|v| v.as_str()) {
+                        if !em.is_empty() {
+                            email = em.to_string();
+                        }
+                    }
+                }
+                user_tier = us
+                    .get("userTier")
+                    .and_then(|t| t.get("name").or_else(|| t.get("description")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ps) = us.get("planStatus") {
+                    let info = ps.get("planInfo").unwrap_or(ps);
+                    plan_name = info
+                        .get("planName")
+                        .or_else(|| info.get("teamsTier"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    available_prompt_credits = ps
+                        .get("availablePromptCredits")
+                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                    monthly_prompt_credits = info
+                        .get("monthlyPromptCredits")
+                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                    available_flow_credits = ps
+                        .get("availableFlowCredits")
+                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                    monthly_flow_credits = info
+                        .get("monthlyFlowCredits")
+                        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                }
+                if let Some(list) = us
+                    .get("cascadeModelConfigData")
+                    .and_then(|c| c.get("clientModelConfigs"))
+                    .and_then(|v| v.as_array())
+                {
+                    models = parse_model_quota_list(list);
+                }
+            }
+
+            if let Ok(ref mval) = models_res {
+                if let Some(list) = mval
+                    .get("clientModelConfigs")
+                    .or_else(|| mval.get("models"))
+                    .and_then(|v| v.as_array())
+                {
+                    let parsed = parse_model_quota_list(list);
+                    if !parsed.is_empty() {
+                        models = parsed;
+                    }
+                }
+            } else if models.is_empty() {
+                if let Err(e) = models_res {
+                    err_code = Some(classify_account_error(&e).to_string());
+                    err_msg = Some(e);
+                } else if let Err(e) = user_res {
+                    err_code = Some(classify_account_error(&e).to_string());
+                    err_msg = Some(e);
+                }
+            }
+
+            AccountQuotaSnapshot {
+                account_id: account.id.clone(),
+                account_label: account.label.clone(),
+                email,
+                plan_name,
+                user_tier,
+                available_prompt_credits,
+                monthly_prompt_credits,
+                available_flow_credits,
+                monthly_flow_credits,
+                online_devices,
+                total_devices,
+                source_device_name: Some(primary_dev.display_name.clone()),
+                models,
+                error_code: err_code,
+                error_message: err_msg,
+                fetched_at_ms: now,
+            }
+        });
+
+        let accounts = join_all(futs).await;
+        Ok(QuotaDashboardSnapshot {
+            accounts,
+            fetched_at_ms: now,
         })
     }
 
@@ -769,6 +1098,7 @@ impl AntigravityClient {
         });
 
         let mut last_sig = String::new();
+        let mut consecutive_errors: u32 = 0;
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(2500));
         // Skip immediate first tick since frontend just loaded initial steps
         interval.tick().await;
@@ -779,32 +1109,50 @@ impl AntigravityClient {
                     break;
                 }
                 _ = interval.tick() => {
-                    if let Ok(val) = self
+                    // Always read latest account cookies in case background RotateCookies updated them
+                    let latest_account = self.auth.get_account(&account.id).unwrap_or_else(|| account.clone());
+                    match self
                         .proxy_unary_json_with_account(
-                            &account,
+                            &latest_account,
                             &device_uuid,
                             "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories",
                             json!({}),
                         )
                         .await
                     {
-                        if let Some(entry) = val
-                            .get("trajectorySummaries")
-                            .and_then(|m| m.get(&cascade_id))
-                        {
-                            let step_count = entry.get("stepCount").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                            let modified = entry.get("lastModifiedTime").and_then(|v| v.as_str()).unwrap_or("");
-                            let sig = format!("{step_count}:{status}:{modified}");
-                            if sig != last_sig {
-                                last_sig = sig;
-                                on_event(AgentStreamEvent::Update {
-                                    payload: json!({
-                                        "cascadeId": cascade_id,
-                                        "stepCount": step_count,
-                                        "status": status,
-                                    }),
+                        Ok(val) => {
+                            consecutive_errors = 0;
+                            if let Some(entry) = val
+                                .get("trajectorySummaries")
+                                .and_then(|m| m.get(&cascade_id))
+                            {
+                                let step_count = entry.get("stepCount").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                                let modified = entry.get("lastModifiedTime").and_then(|v| v.as_str()).unwrap_or("");
+                                let sig = format!("{step_count}:{status}:{modified}");
+                                if sig != last_sig {
+                                    last_sig = sig;
+                                    on_event(AgentStreamEvent::Update {
+                                        payload: json!({
+                                            "cascadeId": cascade_id,
+                                            "stepCount": step_count,
+                                            "status": status,
+                                        }),
+                                    });
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            consecutive_errors += 1;
+                            let code = classify_account_error(&err);
+                            if code == "SESSION_EXPIRED" {
+                                on_event(AgentStreamEvent::Error {
+                                    message: format!("SESSION_EXPIRED: {err}"),
                                 });
+                                break;
+                            }
+                            if consecutive_errors == 3 {
+                                on_event(AgentStreamEvent::Error { message: err });
                             }
                         }
                     }
@@ -814,6 +1162,84 @@ impl AntigravityClient {
 
         on_event(AgentStreamEvent::Closed);
     }
+}
+
+fn classify_account_error(err: &str) -> &'static str {
+    let upper = err.to_ascii_uppercase();
+    if upper.contains("HTTP 401")
+        || upper.contains("SESSION_COOKIE_INVALID")
+        || upper.contains("UNAUTHENTICATED")
+        || upper.contains("MISSING SAPISID")
+    {
+        "SESSION_EXPIRED"
+    } else if upper.contains("NETWORK ERROR")
+        || upper.contains("TIMED OUT")
+        || upper.contains("TIMEOUT")
+        || upper.contains("DNS")
+        || upper.contains("CONNECTION")
+    {
+        "NETWORK_ERROR"
+    } else {
+        "API_ERROR"
+    }
+}
+
+fn parse_model_quota_list(list: &[Value]) -> Vec<ModelQuotaItem> {
+    list.iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let id = m
+                .get("model")
+                .or_else(|| m.get("modelOrAlias").and_then(|o| o.get("model")))
+                .or_else(|| m.get("modelId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("model-{idx}"));
+            let display_name = m
+                .get("label")
+                .or_else(|| m.get("displayName"))
+                .or_else(|| m.get("model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| id.clone());
+            let description = m
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let quota = m.get("quotaInfo");
+            let remaining_fraction = quota
+                .and_then(|q| q.get("remainingFraction"))
+                .and_then(|v| v.as_f64());
+            let reset_val = quota.and_then(|q| q.get("resetTime"));
+            let reset_time_iso = reset_val
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let reset_time_ms = {
+                let ms = parse_proto_timestamp_ms(reset_val);
+                if ms > 0 { Some(ms) } else { None }
+            };
+            let is_default = m
+                .get("isDefault")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let disabled = m
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            ModelQuotaItem {
+                id,
+                display_name,
+                description,
+                remaining_fraction,
+                reset_time_iso,
+                reset_time_ms,
+                is_default,
+                disabled,
+            }
+        })
+        .collect()
 }
 
 fn extract_boq_base_js_url(html: &str) -> Option<String> {
