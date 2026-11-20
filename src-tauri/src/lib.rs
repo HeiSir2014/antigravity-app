@@ -339,7 +339,7 @@ fn open_google_login(
                     .clone()
                     .or_else(|| Some("Google Account".to_string()));
 
-                if let Ok(summary) = state.auth.upsert_account_cookies(
+                if let Ok(mut summary) = state.auth.upsert_account_cookies(
                     None,
                     label,
                     account_email.clone(),
@@ -348,6 +348,33 @@ fn open_google_login(
                     Some(0),
                 ) {
                     if summary.authenticated {
+                        // Resolve the real Google email from the newly captured
+                        // account; outer-account login has no form label.
+                        if let Some(resolved_email) =
+                            state.client.resolve_account_email(&summary.id).await
+                        {
+                            let preferred_label = account_label
+                                .clone()
+                                .filter(|value| !value.starts_with("Google Account"));
+                            let resolved_label = preferred_label.or_else(|| {
+                                resolved_email
+                                    .split('@')
+                                    .next()
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_string)
+                            });
+                            if let Ok(updated) = state.auth.upsert_account_cookies(
+                                Some(summary.id.clone()),
+                                resolved_label,
+                                Some(resolved_email),
+                                HashMap::new(),
+                                HashMap::new(),
+                                None,
+                            ) {
+                                summary = updated;
+                            }
+                        }
                         let _ = login_win.close();
                         let _ = app_handle.emit("agy:account-captured", &summary);
                         // Auto-push encrypted vault to Cloud Sync if signed in, so Mobile syncs automatically

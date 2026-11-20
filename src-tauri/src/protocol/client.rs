@@ -1238,6 +1238,24 @@ impl AntigravityClient {
         .await
     }
 
+    /// Resolve the signed-in Google account email from the account's own
+    /// workstation. Used after Google login so labels are not guessed from
+    /// Cloud Sync (which belongs to a different account).
+    pub async fn resolve_account_email(&self, account_id: &str) -> Option<String> {
+        let instances = self.list_instances(Some(account_id)).await.ok()?;
+        let device = instances
+            .iter()
+            .find(|device| device.status == "RUNNING")
+            .or_else(|| instances.first())?;
+        let value = self.get_user_status(account_id, &device.uuid).await.ok()?;
+        let user = value.get("userStatus").unwrap_or(&value);
+        user.get("email")
+            .and_then(|email| email.as_str())
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(str::to_string)
+    }
+
     pub async fn get_user_status(
         &self,
         account_id: &str,
