@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
-  Gauge,
   KeyRound,
   Laptop,
   Layers,
@@ -39,7 +38,6 @@ interface SessionDrawerProps {
   onSelectSession: (session: UnifiedSessionSummary) => void;
   onNewSession: (accountId: string, deviceUuid: string) => void;
   onRefresh: () => void;
-  onOpenQuotaDashboard?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -57,7 +55,6 @@ export function SessionDrawer({
   onSelectSession,
   onNewSession,
   onRefresh,
-  onOpenQuotaDashboard,
   onOpenSettings,
 }: SessionDrawerProps) {
   const { t, formatRelativeTime } = useI18n();
@@ -253,21 +250,6 @@ export function SessionDrawer({
             </div>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {onOpenQuotaDashboard && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (variant === 'drawer') onClose();
-                  onOpenQuotaDashboard();
-                }}
-                title={t('quotaDashboard')}
-                aria-label={t('quotaDashboard')}
-                className="flex items-center justify-center w-9 h-9 rounded-xl active:scale-95 cursor-pointer"
-                style={{ color: 'var(--text-secondary)' }}
-              >
-                <Gauge className="w-4 h-4" />
-              </button>
-            )}
             <button
               type="button"
               onClick={onRefresh}

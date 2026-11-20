@@ -41,7 +41,7 @@ import { AgentTimeline } from './components/AgentTimeline';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { BottomSheet, type FontSizeMode } from './components/BottomSheet';
 import { Composer } from './components/Composer';
-import { formatResetCountdown, QuotaDashboard } from './components/QuotaDashboard';
+import { formatResetCountdown } from './components/UsagePanel';
 import { SessionDrawer } from './components/SessionDrawer';
 import { TopBar } from './components/TopBar';
 import { createTranslator, I18nContext, resolveLocale, type LocaleCode } from './i18n';
@@ -777,7 +777,6 @@ export function App() {
               onSelectSession={(s) => void loadSessionTrajectory(s)}
               onNewSession={(accId, devUuid) => void handleNewSession(accId, devUuid)}
               onRefresh={() => void refreshLiveSessions()}
-              onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
               onOpenSettings={() => setSheet({ kind: 'Settings' })}
             />
           </div>
@@ -819,7 +818,6 @@ export function App() {
           });
         }}
         onOpenTasks={() => setSheet({ kind: 'TaskList', tasks })}
-        onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
         onOpenSettings={() => setSheet({ kind: 'Settings' })}
       />
 
@@ -1223,7 +1221,7 @@ export function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setSheet({ kind: 'QuotaDashboard' })}
+                onClick={() => setSheet({ kind: 'Settings', subPage: 'usage' })}
                 className="inline-flex items-center gap-1 px-2.5 h-7 rounded-lg text-[0.72rem] font-semibold border cursor-pointer"
                 style={{
                   background: 'var(--bg-surface)',
@@ -1265,21 +1263,13 @@ export function App() {
         onSelectSession={(s) => void loadSessionTrajectory(s)}
         onNewSession={(accId, devUuid) => void handleNewSession(accId, devUuid)}
         onRefresh={() => void refreshLiveSessions()}
-        onOpenQuotaDashboard={() => setSheet({ kind: 'QuotaDashboard' })}
         onOpenSettings={() => setSheet({ kind: 'Settings' })}
       />
 
-      <QuotaDashboard
-        open={sheet?.kind === 'QuotaDashboard'}
-        demoMode={demoMode}
-        accounts={accounts}
-        onClose={() => setSheet(null)}
-        onOpenAccountSettings={() => setSheet({ kind: 'Settings' })}
-      />
-
       <BottomSheet
-        sheet={sheet?.kind === 'QuotaDashboard' ? null : sheet}
+        sheet={sheet}
         accounts={accounts}
+        demoMode={demoMode}
         syncStatus={syncStatus}
         theme={theme}
         fontSize={fontSize}

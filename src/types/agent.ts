@@ -235,8 +235,7 @@ export type SheetDestination =
   | { kind: 'DeviceSessions' }
   | { kind: 'ModelPicker' }
   | { kind: 'SubagentView'; subagent: UnifiedSessionSummary }
-  | { kind: 'QuotaDashboard' }
-  | { kind: 'Settings' };
+  | { kind: 'Settings'; subPage?: 'usage' };
 
 export type AgentStreamEvent =
   | { kind: 'connected'; accountId: string; deviceUuid: string; cascadeId: string }

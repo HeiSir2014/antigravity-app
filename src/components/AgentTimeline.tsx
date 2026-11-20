@@ -622,7 +622,7 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                       </button>
                       <button
                         type="button"
-                        onClick={() => onOpenSheet({ kind: 'QuotaDashboard' })}
+                        onClick={() => onOpenSheet({ kind: 'Settings', subPage: 'usage' })}
                         className="inline-flex items-center gap-1.5 px-3 h-8 rounded-xl text-[0.76rem] font-semibold border cursor-pointer active:scale-95 transition-transform"
                         style={{
                           background: 'var(--bg-surface)',

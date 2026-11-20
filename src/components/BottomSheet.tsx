@@ -9,6 +9,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Gauge,
   Globe,
   KeyRound,
   Laptop,
@@ -42,13 +43,22 @@ import type {
   UnifiedSessionSummary,
 } from '../types/agent';
 import { MarkdownView } from './MarkdownView';
+import { UsagePanel } from './UsagePanel';
 
 export type FontSizeMode = 'compact' | 'default' | 'large';
-type SettingsSubPage = 'overview' | 'accounts' | 'add-account' | 'sync-vault' | 'appearance' | 'updates';
+type SettingsSubPage =
+  | 'overview'
+  | 'accounts'
+  | 'add-account'
+  | 'usage'
+  | 'sync-vault'
+  | 'appearance'
+  | 'updates';
 
 interface BottomSheetProps {
   sheet: SheetDestination | null;
   accounts: AccountSummary[];
+  demoMode: boolean;
   syncStatus: SyncStatusInfo;
   theme: ThemeMode;
   fontSize: FontSizeMode;
@@ -122,6 +132,7 @@ function DiffLines({ diff }: { diff: string }) {
 export function BottomSheet({
   sheet,
   accounts,
+  demoMode,
   syncStatus,
   theme,
   fontSize,
@@ -210,7 +221,7 @@ export function BottomSheet({
     const dlg = dialogRef.current;
     if (!dlg) return;
     if (sheet) {
-      setSubPage('overview');
+      setSubPage(sheet.kind === 'Settings' && sheet.subPage ? sheet.subPage : 'overview');
       setStatusMsg('');
       setDragOffsetY(0);
       if (!dlg.open) dlg.showModal();
@@ -237,6 +248,7 @@ export function BottomSheet({
     if (sheet.kind === 'Settings') {
       if (subPage === 'accounts') return t('accountsRow');
       if (subPage === 'add-account') return t('addAccountTitle');
+      if (subPage === 'usage') return t('quotaDashboard');
       if (subPage === 'sync-vault') return t('vaultTitle');
       if (subPage === 'appearance') return t('appearanceRow');
       if (subPage === 'updates') return t('appUpdatesRow');
@@ -338,7 +350,7 @@ export function BottomSheet({
 
         {/* Sheet Body */}
         <div
-          className="flex-1 overflow-y-auto px-4 py-4 space-y-3.5"
+          className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4 space-y-3.5"
           style={{ paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom, 0px))' }}
         >
           {sheet.kind === 'SubagentView' && (
@@ -830,6 +842,24 @@ export function BottomSheet({
 
                 <button
                   type="button"
+                  onClick={() => setSubPage('usage')}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-3.5 text-left active:opacity-75 cursor-pointer"
+                  style={{ borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Gauge className="w-4.5 h-4.5 shrink-0" style={{ color: 'var(--green)' }} />
+                    <div className="min-w-0">
+                      <div className="text-[0.88rem] font-semibold">{t('quotaDashboard')}</div>
+                      <div className="text-[0.74rem] truncate" style={{ color: 'var(--text-secondary)' }}>
+                        {t('quotaDashboardSub')}
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 shrink-0" style={{ color: 'var(--text-muted)' }} />
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setSubPage('sync-vault')}
                   className="w-full flex items-center justify-between gap-3 px-4 py-3.5 text-left active:opacity-75 cursor-pointer"
                   style={{ borderColor: 'var(--border-subtle)' }}
@@ -902,6 +932,15 @@ export function BottomSheet({
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Subpage: Usage */}
+          {sheet.kind === 'Settings' && subPage === 'usage' && (
+            <UsagePanel
+              demoMode={demoMode}
+              accounts={accounts}
+              onOpenAccountSettings={() => setSubPage('accounts')}
+            />
           )}
 
           {/* Subpage: Multi-Account List */}
