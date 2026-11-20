@@ -10,6 +10,8 @@ export interface AccountSummary {
   id: string;
   label: string;
   email: string;
+  name?: string;
+  avatarUrl?: string;
   authenticated: boolean;
   hasSapisid: boolean;
   cookieCount: number;

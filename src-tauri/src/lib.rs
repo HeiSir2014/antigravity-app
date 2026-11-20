@@ -56,6 +56,35 @@ fn list_accounts(state: State<'_, AppState>) -> Vec<AccountSummary> {
 }
 
 #[tauri::command]
+async fn refresh_account_profiles(
+    state: State<'_, AppState>,
+) -> Result<Vec<AccountSummary>, String> {
+    for account in state.auth.enabled_authenticated_accounts() {
+        let needs_profile = account.email.trim().is_empty()
+            || account.name.trim().is_empty()
+            || account.label.starts_with("Google Account");
+        if !needs_profile {
+            continue;
+        }
+        if let Some(identity) = state.client.resolve_account_identity(&account.id).await {
+            let preferred_label = if account.label.starts_with("Google Account") {
+                None
+            } else {
+                Some(account.label.clone())
+            };
+            let _ = state.auth.update_account_profile(
+                &account.id,
+                identity.email,
+                identity.name,
+                identity.avatar_url,
+                preferred_label,
+            );
+        }
+    }
+    Ok(state.auth.list_accounts())
+}
+
+#[tauri::command]
 async fn import_account_cookies(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -348,29 +377,20 @@ fn open_google_login(
                     Some(0),
                 ) {
                     if summary.authenticated {
-                        // Resolve the real Google email from the newly captured
-                        // account; outer-account login has no form label.
-                        if let Some(resolved_email) =
-                            state.client.resolve_account_email(&summary.id).await
+                        // Resolve the real Google profile from the newly
+                        // captured account; outer-account login has no form label.
+                        if let Some(identity) =
+                            state.client.resolve_account_identity(&summary.id).await
                         {
                             let preferred_label = account_label
                                 .clone()
                                 .filter(|value| !value.starts_with("Google Account"));
-                            let resolved_label = preferred_label.or_else(|| {
-                                resolved_email
-                                    .split('@')
-                                    .next()
-                                    .map(str::trim)
-                                    .filter(|value| !value.is_empty())
-                                    .map(str::to_string)
-                            });
-                            if let Ok(updated) = state.auth.upsert_account_cookies(
-                                Some(summary.id.clone()),
-                                resolved_label,
-                                Some(resolved_email),
-                                HashMap::new(),
-                                HashMap::new(),
-                                None,
+                            if let Ok(updated) = state.auth.update_account_profile(
+                                &summary.id,
+                                identity.email,
+                                identity.name,
+                                identity.avatar_url,
+                                preferred_label,
                             ) {
                                 summary = updated;
                             }
@@ -702,6 +722,9 @@ pub fn run() {
             let bg_auth_rotate = auth.clone();
             let bg_sync_dirty = sync.clone();
             let bg_app_dirty = app.handle().clone();
+            let profile_client = client.clone();
+            let profile_auth = auth.clone();
+            let profile_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(480));
                 // First tick after 30s startup grace period
@@ -737,6 +760,38 @@ pub fn run() {
                 }
             });
 
+            // Resolve real Google profile data for legacy/cookie-imported
+            // accounts. Runs in Rust so it does not depend on the WebView
+            // being ready or on IPC.
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                for account in profile_auth.enabled_authenticated_accounts() {
+                    let needs_profile = account.email.trim().is_empty()
+                        || account.name.trim().is_empty()
+                        || account.label.starts_with("Google Account");
+                    if !needs_profile {
+                        continue;
+                    }
+                    if let Some(identity) =
+                        profile_client.resolve_account_identity(&account.id).await
+                    {
+                        let preferred_label = if account.label.starts_with("Google Account") {
+                            None
+                        } else {
+                            Some(account.label.clone())
+                        };
+                        let _ = profile_auth.update_account_profile(
+                            &account.id,
+                            identity.email,
+                            identity.name,
+                            identity.avatar_url,
+                            preferred_label,
+                        );
+                    }
+                }
+                let _ = profile_app.emit("agy:accounts-updated", ());
+            });
+
             app.manage(AppState {
                 auth,
                 client,
@@ -747,6 +802,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_accounts,
+            refresh_account_profiles,
             import_account_cookies,
             toggle_account,
             remove_account,

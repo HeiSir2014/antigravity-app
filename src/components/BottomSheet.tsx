@@ -956,21 +956,30 @@ export function BottomSheet({
                       style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className="flex items-center justify-center w-9 h-9 rounded-full text-sm font-bold shrink-0"
-                          style={{ background: `${col}22`, color: col }}
-                        >
-                          {acc.label.slice(0, 1).toUpperCase()}
-                        </div>
+                        {acc.avatarUrl ? (
+                          <img
+                            src={acc.avatarUrl}
+                            alt={acc.name || acc.label}
+                            className="w-9 h-9 rounded-full object-cover shrink-0"
+                          />
+                        ) : (
+                          <div
+                            className="flex items-center justify-center w-9 h-9 rounded-full text-sm font-bold shrink-0"
+                            style={{ background: `${col}22`, color: col }}
+                          >
+                            {(acc.name || acc.label).slice(0, 1).toUpperCase()}
+                          </div>
+                        )}
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
                             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col }} />
                             <span className="text-[0.88rem] font-semibold truncate">{acc.label}</span>
                           </div>
                           <div className="text-[0.72rem] truncate" style={{ color: 'var(--text-muted)' }}>
-                            {acc.authenticated
-                              ? `${acc.cookieCount} cookies · AuthUser ${acc.authUser}`
-                              : acc.email || t('previewBadge')}
+                            {acc.email ||
+                              (acc.authenticated
+                                ? `${acc.cookieCount} cookies · AuthUser ${acc.authUser}`
+                                : t('previewBadge'))}
                           </div>
                         </div>
                       </div>

@@ -178,6 +178,10 @@ pub struct AccountRecord {
     pub id: String,
     pub label: String,
     pub email: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: String,
     pub cookies: HashMap<String, String>,
     #[serde(default)]
     pub accounts_cookies: HashMap<String, String>,
@@ -205,6 +209,8 @@ impl AccountRecord {
             id: self.id.clone(),
             label: self.label.clone(),
             email: self.email.clone(),
+            name: self.name.clone(),
+            avatar_url: self.avatar_url.clone(),
             authenticated: self.is_authenticated(),
             has_sapisid: self.has_sapisid(),
             cookie_count: self.cookies.len() + self.accounts_cookies.len(),
@@ -294,6 +300,8 @@ pub struct AccountSummary {
     pub id: String,
     pub label: String,
     pub email: String,
+    pub name: String,
+    pub avatar_url: String,
     pub authenticated: bool,
     pub has_sapisid: bool,
     pub cookie_count: usize,
@@ -660,6 +668,8 @@ impl AuthStore {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| format!("Account #{next_idx}")),
             email: email.unwrap_or_default(),
+            name: String::new(),
+            avatar_url: String::new(),
             cookies: clean_cookies,
             accounts_cookies: clean_accounts,
             auth_user: auth_user.unwrap_or(0),
@@ -668,6 +678,46 @@ impl AuthStore {
         };
         let summary = record.summary();
         guard.accounts.push(record);
+        self.persist_locked(&guard)?;
+        Ok(summary)
+    }
+
+    /// Stores the real Google profile returned by `GetUserStatus`.
+    pub fn update_account_profile(
+        &self,
+        account_id: &str,
+        email: String,
+        name: String,
+        avatar_url: String,
+        preferred_label: Option<String>,
+    ) -> Result<AccountSummary, String> {
+        let mut guard = self.vault.write().unwrap_or_else(|e| e.into_inner());
+        let Some(account) = guard.accounts.iter_mut().find(|a| a.id == account_id) else {
+            return Err("Account not found".to_string());
+        };
+        if !email.trim().is_empty() {
+            account.email = email.trim().to_string();
+        }
+        if !name.trim().is_empty() {
+            account.name = name.trim().to_string();
+        }
+        if !avatar_url.trim().is_empty() {
+            account.avatar_url = avatar_url.trim().to_string();
+        }
+        let fallback_label = preferred_label
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| account.email.split('@').next().map(str::to_string))
+            .filter(|value| !value.is_empty());
+        if let Some(label) = fallback_label {
+            if account.label.is_empty() || account.label.starts_with("Google Account") {
+                account.label = label;
+            }
+        }
+        let updated_at_ms = now_ms();
+        account.updated_at_ms = updated_at_ms;
+        let summary = account.summary();
+        guard.updated_at_ms = updated_at_ms;
         self.persist_locked(&guard)?;
         Ok(summary)
     }
@@ -832,6 +882,44 @@ mod dirty_tests {
         assert!(store.is_dirty());
         store.clear_dirty();
         assert!(!store.is_dirty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updates_and_persists_google_profile_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "agy-auth-profile-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = AuthStore::new(dir.clone());
+        let summary = store
+            .upsert_account_cookies(
+                None,
+                Some("Google Account 2".to_string()),
+                None,
+                HashMap::new(),
+                HashMap::new(),
+                None,
+            )
+            .unwrap();
+        let updated = store
+            .update_account_profile(
+                &summary.id,
+                "heisir21@gmail.com".to_string(),
+                "hei sir".to_string(),
+                "data:image/png;base64,abc".to_string(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.label, "heisir21");
+        assert_eq!(updated.email, "heisir21@gmail.com");
+        assert_eq!(updated.name, "hei sir");
+        assert_eq!(updated.avatar_url, "data:image/png;base64,abc");
+        let raw = fs::read_to_string(dir.join("accounts_vault.json")).unwrap();
+        assert!(raw.contains("\"name\""));
+        assert!(raw.contains("\"avatarUrl\""));
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -616,6 +616,7 @@ export function App() {
       .catch(() => {});
 
     let unlistenCaptured: (() => void) | null = null;
+    let unlistenProfiles: (() => void) | null = null;
     let unlistenSync: (() => void) | null = null;
     let unlistenOpenUrl: (() => void) | null = null;
 
@@ -648,6 +649,11 @@ export function App() {
         void refreshLiveSessions();
       }).then((fn) => {
         unlistenCaptured = fn;
+      });
+      void listen('agy:accounts-updated', () => {
+        void refreshLiveSessions();
+      }).then((fn) => {
+        unlistenProfiles = fn;
       });
       void listen<SyncStatusInfo>('agy:sync-updated', (evt) => {
         setSyncStatus(evt.payload);
@@ -685,6 +691,7 @@ export function App() {
       window.removeEventListener('online', handleOnlineRefresh);
       window.removeEventListener('agy:oauth-callback', handleAndroidOAuthCallback);
       if (unlistenCaptured) unlistenCaptured();
+      if (unlistenProfiles) unlistenProfiles();
       if (unlistenSync) unlistenSync();
       if (unlistenOpenUrl) unlistenOpenUrl();
       if (activeStreamIdRef.current) {

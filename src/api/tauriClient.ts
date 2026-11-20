@@ -16,6 +16,11 @@ export async function listAccounts(): Promise<AccountSummary[]> {
   return invoke<AccountSummary[]>('list_accounts');
 }
 
+export async function refreshAccountProfiles(): Promise<AccountSummary[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<AccountSummary[]>('refresh_account_profiles');
+}
+
 export async function importAccountCookies(params: {
   accountId?: string;
   label?: string;

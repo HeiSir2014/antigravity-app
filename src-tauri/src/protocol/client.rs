@@ -126,6 +126,31 @@ pub enum AgentStreamEvent {
     Closed,
 }
 
+fn decode_js_hex_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() && bytes[index + 1] == b'x' {
+            if let Ok(value) = u8::from_str_radix(&input[index + 2..index + 4], 16) {
+                output.push(value);
+                index += 4;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAccountIdentity {
+    pub email: String,
+    pub name: String,
+    pub avatar_url: String,
+}
+
 pub struct AntigravityClient {
     http: reqwest::Client,
     auth: Arc<AuthStore>,
@@ -1238,10 +1263,56 @@ impl AntigravityClient {
         .await
     }
 
-    /// Resolve the signed-in Google account email from the account's own
-    /// workstation. Used after Google login so labels are not guessed from
-    /// Cloud Sync (which belongs to a different account).
-    pub async fn resolve_account_email(&self, account_id: &str) -> Option<String> {
+    /// Resolve the signed-in Google profile from `ListAccounts`; this works
+    /// even when the second account has no paired workstation yet.
+    async fn profile_from_list_accounts(
+        &self,
+        account: &AccountRecord,
+    ) -> Option<ResolvedAccountIdentity> {
+        let cookie = account.accounts_cookie_header()?;
+        let response = self
+            .http
+            .get("https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard&hl=en")
+            .header(COOKIE, cookie)
+            .header(ORIGIN, "https://accounts.google.com")
+            .header(REFERER, "https://accounts.google.com/")
+            .header("x-same-domain", "1")
+            .send()
+            .await
+            .ok()?;
+        let body = response.text().await.ok()?;
+        let payload_start = body.find("postMessage('")? + "postMessage('".len();
+        let rest = &body[payload_start..];
+        let payload_end = rest.find("', '")?;
+        let decoded = decode_js_hex_escapes(&rest[..payload_end]);
+        let value: Value = serde_json::from_str(&decoded).ok()?;
+        let account_entry = value.get(1)?.as_array()?.first()?.as_array()?;
+        let name = account_entry.get(2).and_then(|v| v.as_str()).unwrap_or_default();
+        let email = account_entry.get(3).and_then(|v| v.as_str())?.trim();
+        if email.is_empty() {
+            return None;
+        }
+        let avatar_url = account_entry
+            .get(4)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        Some(ResolvedAccountIdentity {
+            email: email.to_string(),
+            name: name.trim().to_string(),
+            avatar_url: avatar_url.to_string(),
+        })
+    }
+
+    /// Resolve the signed-in Google profile from the account's own workstation.
+    /// Used after Google login so identity is not guessed from Cloud Sync.
+    pub async fn resolve_account_identity(
+        &self,
+        account_id: &str,
+    ) -> Option<ResolvedAccountIdentity> {
+        let account = self.resolve_account(account_id).ok()?;
+        if let Some(identity) = self.profile_from_list_accounts(&account).await {
+            return Some(identity);
+        }
         let instances = self.list_instances(Some(account_id)).await.ok()?;
         let device = instances
             .iter()
@@ -1249,11 +1320,29 @@ impl AntigravityClient {
             .or_else(|| instances.first())?;
         let value = self.get_user_status(account_id, &device.uuid).await.ok()?;
         let user = value.get("userStatus").unwrap_or(&value);
-        user.get("email")
+        let email = user
+            .get("email")
             .and_then(|email| email.as_str())
             .map(str::trim)
-            .filter(|email| !email.is_empty())
-            .map(str::to_string)
+            .unwrap_or_default();
+        if email.is_empty() {
+            return None;
+        }
+        Some(ResolvedAccountIdentity {
+            email: email.to_string(),
+            name: user
+                .get("name")
+                .and_then(|name| name.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            avatar_url: user
+                .get("profilePictureUrl")
+                .or_else(|| user.get("profilePictureUri"))
+                .and_then(|avatar| avatar.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
     }
 
     pub async fn get_user_status(

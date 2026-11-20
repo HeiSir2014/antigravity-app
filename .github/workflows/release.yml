@@ -96,7 +96,7 @@ jobs:
             - **Live Model & Slash Commands**: Falls back to `GetAvailableModels` when a workspace-runner LS returns an empty model catalog, and sends the resolved default model to `GetSlashCommands`.
             - **Android Notification Approval**: Approve / Deny / Deny-with-comment actions now cross the native bridge and resolve the pending interaction, with a WebKit-cookie login fallback.
             - **Two-Tier Auto-Updater**: ~140 KB incremental `web-bundle.tar.gz` delta updates + SHA-256 verified full native installers.
-            - **v2.0.8 Fix**: After Google login, the app resolves the new account's real email via `GetUserStatus` on its own workstation and uses it as the label, instead of leaving `Google Account N`.
+            - **v2.0.9 Fix**: Google profile identity is resolved from `ListAccounts` (email, display name, avatar) and persisted; existing `Google Account N` entries are auto-repaired on startup without needing a paired workstation.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
