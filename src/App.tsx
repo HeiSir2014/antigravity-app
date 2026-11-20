@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { AlertTriangle, Cloud, FileUp, Gauge, Globe, KeyRound, RefreshCw, Sparkles } from 'lucide-react';
+import {
+  AlertTriangle,
+  Cloud,
+  FileUp,
+  Gauge,
+  Globe,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+  Sparkles,
+} from 'lucide-react';
 import {
   cancelInvocation,
   exportVaultJson,
@@ -147,6 +157,7 @@ export function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [isLiveConnected, setIsLiveConnected] = useState(false);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isTrajectoryLoading, setIsTrajectoryLoading] = useState(false);
   const [isSubmittingApproval, setIsSubmittingApproval] = useState(false);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -155,6 +166,10 @@ export function App() {
   const [sheet, setSheet] = useState<SheetDestination | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
   const pendingApprovalKeyRef = useRef<string | null>(null);
+  const sessionLoadSeqRef = useRef(0);
+  const trajectoryCacheRef = useRef(new Map<string, unknown[]>());
+  const modelCacheRef = useRef(new Map<string, ModelOption[]>());
+  const slashCacheRef = useRef(new Map<string, Array<{ cmd: string; desc: string }>>());
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -204,12 +219,25 @@ export function App() {
   }, [permissionMode]);
 
   const loadSessionTrajectory = useCallback(async (session: UnifiedSessionSummary) => {
+    const loadSeq = ++sessionLoadSeqRef.current;
+    const isCurrent = () => loadSeq === sessionLoadSeqRef.current;
+
     setActiveSession(session);
+    // Switching sessions must never leave the previous conversation on screen.
+    setTimeline([]);
+    setPendingApproval(null);
+    setTasks([]);
+    setAllDiffs([]);
     setRemoteSlashCommands([]);
+    setIsRunning(false);
+    setIsLiveConnected(false);
+    setIsTrajectoryLoading(true);
+
     if (!isTauriRuntime() || session.accountId.startsWith('demo-')) {
       setTimeline(DEMO_TIMELINE);
       setPendingApproval(DEMO_APPROVAL);
       setTasks(DEMO_TASKS);
+      setIsTrajectoryLoading(false);
       return;
     }
 
@@ -217,27 +245,49 @@ export function App() {
       void stopAgentStream(activeStreamIdRef.current).catch(() => {});
       activeStreamIdRef.current = null;
     }
-    setIsLiveConnected(false);
 
-    // Show cached steps immediately if available so flaky mobile/tunnel reconnects never show a blank screen
-    const cacheKey = `agy.steps.${session.cascadeId}`;
-    let hadCachedSteps = false;
-    try {
-      const cachedRaw = localStorage.getItem(cacheKey);
-      if (cachedRaw) {
-        const cachedSteps = JSON.parse(cachedRaw) as unknown[];
-        if (Array.isArray(cachedSteps) && cachedSteps.length > 0) {
-          const norm = normalizeTrajectorySteps(cachedSteps, session.cascadeId);
-          setTimeline(norm.items);
-          setPendingApproval(norm.pendingApproval);
-          setAllDiffs(norm.allDiffs);
-          setTasks(norm.tasks);
-          hadCachedSteps = true;
+    // Memory + localStorage cache: render the new session immediately, then
+    // refresh from the workstation in the background.
+    const cacheKey = `agy.steps.${session.accountId}.${session.deviceUuid}.${session.cascadeId}`;
+    const legacyCacheKey = `agy.steps.${session.cascadeId}`;
+    let cachedSteps = trajectoryCacheRef.current.get(cacheKey);
+    if (!cachedSteps) {
+      try {
+        const cachedRaw = localStorage.getItem(cacheKey) || localStorage.getItem(legacyCacheKey);
+        if (cachedRaw) {
+          const parsed = JSON.parse(cachedRaw) as unknown[];
+          if (Array.isArray(parsed) && parsed.length > 0) cachedSteps = parsed;
         }
+      } catch {
+        // Ignore corrupt cache
       }
-    } catch {
-      // Ignore corrupt cache
     }
+    let hadCachedSteps = false;
+    if (cachedSteps && cachedSteps.length > 0) {
+      const norm = normalizeTrajectorySteps(cachedSteps, session.cascadeId);
+      if (!isCurrent()) return;
+      setTimeline(norm.items);
+      setPendingApproval(norm.pendingApproval);
+      setAllDiffs(norm.allDiffs);
+      setTasks(norm.tasks);
+      hadCachedSteps = true;
+    }
+
+    const deviceKey = `${session.accountId}::${session.deviceUuid}`;
+    const slashKey = `${deviceKey}::${session.cascadeId}`;
+    const applyModels = (mapped: ModelOption[]) => {
+      if (!isCurrent() || mapped.length === 0) return;
+      setAvailableModels(mapped);
+      setActiveModel((prev) => {
+        const existing = mapped.find((m) => m.displayName === prev || m.id === prev);
+        if (existing) return existing.displayName;
+        return (mapped.find((m) => m.isDefault) || mapped[0]).displayName;
+      });
+    };
+    const cachedModels = modelCacheRef.current.get(deviceKey);
+    if (cachedModels) applyModels(cachedModels);
+    const cachedSlash = slashCacheRef.current.get(slashKey);
+    if (cachedSlash) setRemoteSlashCommands(cachedSlash);
 
     const initialOffset = Math.max(0, (session.stepCount || 0) - 100);
     try {
@@ -247,7 +297,9 @@ export function App() {
         session.cascadeId,
         initialOffset
       );
+      if (!isCurrent()) return;
       const rawSteps = resp.steps || [];
+      trajectoryCacheRef.current.set(cacheKey, rawSteps.slice(-100));
       try {
         if (rawSteps.length > 0) {
           localStorage.setItem(cacheKey, JSON.stringify(rawSteps.slice(-100)));
@@ -262,30 +314,31 @@ export function App() {
       setTasks(normalized.tasks);
       setIsRunning(normalized.isRunning);
 
-      // Fetch real model configs & quota from the remote machine in background
-      void getModelConfigs(session.accountId, session.deviceUuid)
-        .then((raw) => {
-          const mapped = mapClientModelConfigs(raw);
-          if (mapped.length > 0) {
-            setAvailableModels(mapped);
-            setActiveModel((prev) => {
-              const existing = mapped.find((m) => m.displayName === prev || m.id === prev);
-              if (existing) return existing.displayName;
-              return (mapped.find((m) => m.isDefault) || mapped[0]).displayName;
-            });
-          }
-        })
-        .catch(() => {});
+      if (!cachedModels) {
+        void getModelConfigs(session.accountId, session.deviceUuid)
+          .then((raw) => {
+            const mapped = mapClientModelConfigs(raw);
+            if (mapped.length === 0) return;
+            modelCacheRef.current.set(deviceKey, mapped);
+            applyModels(mapped);
+          })
+          .catch(() => {});
+      }
 
-      // Prefer the workspace/agent's own slash commands over the built-in
-      // Claude-style fallback list.
-      // Let the backend resolve the default model from GetAvailableModels;
-      // `loadSessionTrajectory` has stable deps and must not capture the
-      // current UI model here.
-      void getSlashCommands(session.accountId, session.deviceUuid, session.cascadeId)
-        .then((raw) => setRemoteSlashCommands(mapSlashCommands(raw)))
-        .catch(() => {});
+      if (!cachedSlash) {
+        // Let the backend resolve the default model from GetAvailableModels;
+        // `loadSessionTrajectory` has stable deps and must not capture the
+        // current UI model here.
+        void getSlashCommands(session.accountId, session.deviceUuid, session.cascadeId)
+          .then((raw) => {
+            const mapped = mapSlashCommands(raw);
+            slashCacheRef.current.set(slashKey, mapped);
+            if (isCurrent()) setRemoteSlashCommands(mapped);
+          })
+          .catch(() => {});
+      }
     } catch (err) {
+      if (!isCurrent()) return;
       const errStr = String(err);
       if (!hadCachedSteps) {
         setTimeline([
@@ -301,11 +354,15 @@ export function App() {
           },
         ]);
       }
+    } finally {
+      if (isCurrent()) setIsTrajectoryLoading(false);
     }
 
+    if (!isCurrent()) return;
     const streamId = `stream-${Date.now()}`;
     activeStreamIdRef.current = streamId;
     void streamAgentState(streamId, session.accountId, session.deviceUuid, session.cascadeId, (evt) => {
+      if (!isCurrent()) return;
       if (evt.kind === 'connected') {
         setIsLiveConnected(true);
       } else if (evt.kind === 'update') {
@@ -313,7 +370,10 @@ export function App() {
         const nextOffset = Math.max(0, (payload?.stepCount || session.stepCount || 0) - 100);
         void getTrajectorySteps(session.accountId, session.deviceUuid, session.cascadeId, nextOffset)
           .then((r) => {
-            const norm = normalizeTrajectorySteps(r.steps || [], session.cascadeId);
+            if (!isCurrent()) return;
+            const rawSteps = r.steps || [];
+            trajectoryCacheRef.current.set(cacheKey, rawSteps.slice(-100));
+            const norm = normalizeTrajectorySteps(rawSteps, session.cascadeId);
             setTimeline(norm.items);
             setPendingApproval(norm.pendingApproval);
             setAllDiffs(norm.allDiffs);
@@ -343,7 +403,7 @@ export function App() {
         setIsLiveConnected(false);
       }
     }).catch(() => {
-      setIsLiveConnected(false);
+      if (isCurrent()) setIsLiveConnected(false);
     });
   }, []);
 
@@ -1183,12 +1243,22 @@ export function App() {
               ))}
             </div>
           )}
-          <AgentTimeline
-            items={timeline}
-            isRunning={isRunning}
-            onOpenSheet={setSheet}
-            onAnswerQuestion={(_qId, ans) => void handleSend(ans, [])}
-          />
+          {isTrajectoryLoading && timeline.length === 0 ? (
+            <div
+              className="flex-1 flex flex-col items-center justify-center gap-2.5 py-12"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              <Loader2 className="w-5 h-5 animate-spin" style={{ color: 'var(--accent)' }} />
+              <span className="text-[0.82rem]">{i18nValue.t('loadingConversation')}</span>
+            </div>
+          ) : (
+            <AgentTimeline
+              items={timeline}
+              isRunning={isRunning}
+              onOpenSheet={setSheet}
+              onAnswerQuestion={(_qId, ans) => void handleSend(ans, [])}
+            />
+          )}
         </>
       )}
 
