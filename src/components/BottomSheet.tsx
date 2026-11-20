@@ -277,7 +277,7 @@ export function BottomSheet({
   return (
     <dialog
       ref={dialogRef}
-      className="agy-sheet"
+      className={`agy-sheet${sheet.kind === 'Settings' ? ' agy-sheet-settings' : ''}`}
       style={{
         transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined,
         transition: dragStartYRef.current === null ? 'transform 0.2s ease' : 'none',

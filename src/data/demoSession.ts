@@ -128,7 +128,7 @@ export const DEMO_TIMELINE: TimelineItem[] = [
     kind: 'thinking',
     stepIndex: 1,
     durationSec: 5,
-    text: 'I will fan out ListInstances and SearchConversations concurrently across all enabled Antigravity accounts and online devices in Rust, tag every session with accountId + deviceUuid, and provide Unified / By Account / By Device view modes in the mobile drawer.',
+    text: 'I will fan out ListInstances and SearchConversations concurrently across all enabled Antigravity accounts and online devices in Rust, tag every session with accountId + deviceUuid, and keep one searchable session feed with optional account/device filters in the drawer.',
   },
   {
     id: 'tool-1',
@@ -188,7 +188,7 @@ export const DEMO_TIMELINE: TimelineItem[] = [
     stepIndex: 5,
     title: 'implementation_plan.md',
     path: 'docs/implementation_plan.md',
-    markdown: `# Pure-Native Antigravity v2 (Multi-Account)\n\n- **Multi-Account Engine**: Concurrent fan-out across all enabled Google accounts × paired machines\n- **Views**: Claude Code-style **Unified Feed**, **Grouped by Account**, and **Grouped by Device**\n- **Sync Vault**: Versioned \`antigravity-vault/v1\` bundle ready for PC ↔ Mobile cloud sync`,
+    markdown: `# Pure-Native Antigravity v2 (Multi-Account)\n\n- **Multi-Account Engine**: Concurrent fan-out across all enabled Google accounts × paired machines\n- **Views**: one Claude-style **session feed**, with account/device filters in the filter panel\n- **Sync Vault**: Versioned \`antigravity-vault/v1\` bundle ready for PC ↔ Mobile cloud sync`,
   },
   {
     id: 'tool-4',
@@ -211,7 +211,7 @@ export const DEMO_TIMELINE: TimelineItem[] = [
     id: 'asst-1',
     kind: 'assistant',
     stepIndex: 7,
-    markdown: `已升级为 **多账号无头原生架构**：\n\n1. **多账号 × 多设备融合**：左上角抽屉支持在 **融合 (Unified)**、**按账号 (Account)**、**按设备 (Device)** 三种视图间一键切换。\n2. **账号与 Vault 同步**：右上角 **Settings** 支持管理多个 Antigravity 账号，并通过自建 Bun 云端服务实现 PC ↔ 手机端一键同步。`,
+    markdown: `已升级为 **多账号无头原生架构**：\n\n1. **多账号 × 多设备融合**：左上角抽屉使用单一会话流，通过筛选面板按账号或设备过滤，不再切换三种视图。\n2. **账号与 Vault 同步**：右上角 **Settings** 支持管理多个 Antigravity 账号，并通过自建 Bun 云端服务实现 PC ↔ 手机端一键同步。`,
   },
   {
     id: 'q-1',

@@ -1,7 +1,5 @@
 export type ThemeMode = 'system' | 'light' | 'dark';
 
-export type SessionViewMode = 'unified' | 'by-account' | 'by-device';
-
 export type PermissionMode =
   | 'request-review'
   | 'accept-edits'

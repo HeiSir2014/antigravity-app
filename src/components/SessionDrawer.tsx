@@ -1,16 +1,12 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  ChevronDown,
-  ChevronRight,
   KeyRound,
   Laptop,
-  Layers,
   Plus,
   RefreshCw,
   Search,
-  User,
-  Users,
+  SlidersHorizontal,
   X,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -20,7 +16,6 @@ import type {
   AccountFetchError,
   AccountSummary,
   DeviceInstance,
-  SessionViewMode,
   UnifiedSessionSummary,
 } from '../types/agent';
 
@@ -59,19 +54,10 @@ export function SessionDrawer({
 }: SessionDrawerProps) {
   const { t, formatRelativeTime } = useI18n();
   const [query, setQuery] = useState('');
-  const [viewMode, setViewMode] = useState<SessionViewMode>(() => {
-    const saved = localStorage.getItem('agy.sessionViewMode') as SessionViewMode | null;
-    return saved || 'unified';
-  });
   const [selectedAccount, setSelectedAccount] = useState<string>('all');
   const [selectedDevice, setSelectedDevice] = useState<string>('all');
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [filterOpen, setFilterOpen] = useState(false);
   const touchStartXRef = useRef<number | null>(null);
-
-  const updateViewMode = (mode: SessionViewMode) => {
-    setViewMode(mode);
-    localStorage.setItem('agy.sessionViewMode', mode);
-  };
 
   const subagentCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -100,36 +86,6 @@ export function SessionDrawer({
     });
   }, [sessions, query, selectedAccount, selectedDevice]);
 
-  const grouped = useMemo(() => {
-    if (viewMode === 'unified') return null;
-    const map = new Map<
-      string,
-      { key: string; title: string; subtitle?: string; color?: string; items: UnifiedSessionSummary[] }
-    >();
-    for (const s of filtered) {
-      if (viewMode === 'by-account') {
-        const key = s.accountId || 'default';
-        const existing = map.get(key);
-        if (existing) existing.items.push(s);
-        else map.set(key, { key, title: s.accountLabel || 'Account', color: accountColor(key), items: [s] });
-      } else {
-        const key = `${s.accountId}::${s.deviceUuid}`;
-        const existing = map.get(key);
-        if (existing) existing.items.push(s);
-        else {
-          map.set(key, {
-            key,
-            title: s.deviceName,
-            subtitle: s.accountLabel,
-            color: accountColor(s.accountId),
-            items: [s],
-          });
-        }
-      }
-    }
-    return Array.from(map.values());
-  }, [filtered, viewMode]);
-
   if (!open) return null;
 
   const authedCount = accounts.filter((a) => a.authenticated && a.enabled).length;
@@ -142,6 +98,13 @@ export function SessionDrawer({
         (d.status === 'RUNNING' || d.status === 'IDLE')
     ) ||
     devices[0];
+  const filtersActive = selectedAccount !== 'all' || selectedDevice !== 'all';
+  const selectedAccountLabel = accounts.find((acc) => acc.id === selectedAccount)?.label;
+  const selectedDeviceLabel = devices.find((device) => device.uuid === selectedDevice)?.displayName;
+  const clearFilters = () => {
+    setSelectedAccount('all');
+    setSelectedDevice('all');
+  };
 
   const renderSessionRow = (s: UnifiedSessionSummary) => {
     const isActive = s.id === activeSessionId;
@@ -180,7 +143,7 @@ export function SessionDrawer({
         </div>
 
         <div className="flex items-center flex-wrap gap-1.5 mt-1 text-[0.72rem]" style={{ color: 'var(--text-secondary)' }}>
-          {viewMode !== 'by-account' && s.accountLabel && (
+          {s.accountLabel && (
             <span
               className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[0.66rem] font-semibold"
               style={{ background: `${accCol}1f`, color: accCol }}
@@ -188,12 +151,10 @@ export function SessionDrawer({
               {s.accountLabel}
             </span>
           )}
-          {viewMode !== 'by-device' && (
-            <span className="inline-flex items-center gap-1 truncate max-w-[120px]">
-              <Laptop className="w-3 h-3 shrink-0" />
-              <span className="truncate">{s.deviceName}</span>
-            </span>
-          )}
+          <span className="inline-flex items-center gap-1 truncate max-w-[120px]">
+            <Laptop className="w-3 h-3 shrink-0" />
+            <span className="truncate">{s.deviceName}</span>
+          </span>
           <span className="truncate max-w-[110px]" style={{ color: 'var(--text-muted)' }}>
             · {s.workspaceName}
           </span>
@@ -290,128 +251,169 @@ export function SessionDrawer({
             </span>
           </button>
 
-          <div
-            className="flex items-center gap-2 px-3 h-10 rounded-xl border"
-            style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
-          >
-            <Search className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('searchPlaceholder')}
-              className="w-full bg-transparent text-[0.84rem] outline-none"
-              style={{ color: 'var(--text-primary)' }}
-            />
-          </div>
-
-          {/* 3-Mode View Switcher */}
-          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl" style={{ background: 'var(--bg-elevated)' }}>
-            {(
-              [
-                { id: 'unified', label: t('viewUnified'), icon: Layers },
-                { id: 'by-account', label: t('viewByAccount'), icon: Users },
-                { id: 'by-device', label: t('viewByDevice'), icon: Laptop },
-              ] as const
-            ).map((tab) => {
-              const Icon = tab.icon;
-              const active = viewMode === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => updateViewMode(tab.id)}
-                  className="flex items-center justify-center gap-1 h-8 px-1.5 min-w-0 rounded-lg text-[0.75rem] font-semibold transition-colors cursor-pointer"
-                  style={{
-                    background: active ? 'var(--bg-surface)' : 'transparent',
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    boxShadow: active ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
-                  }}
-                >
-                  <Icon className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">{tab.label}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Account Filter Pills (hidden when already grouped by Account) */}
-          {accounts.length > 1 && viewMode !== 'by-account' && (
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar scroll-fade-right pr-6">
-              <button
-                type="button"
-                onClick={() => setSelectedAccount('all')}
-                className="px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
-                style={{
-                  background: selectedAccount === 'all' ? 'var(--text-primary)' : 'var(--bg-elevated)',
-                  color: selectedAccount === 'all' ? 'var(--bg-surface)' : 'var(--text-secondary)',
-                }}
-              >
-                {t('allAccounts')}
-              </button>
-              {accounts.map((acc) => {
-                const active = selectedAccount === acc.id;
-                return (
-                  <button
-                    key={acc.id}
-                    type="button"
-                    onClick={() => setSelectedAccount(acc.id)}
-                    className="flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
-                    style={{
-                      background: active ? 'var(--text-primary)' : 'var(--bg-elevated)',
-                      color: active ? 'var(--bg-surface)' : 'var(--text-secondary)',
-                    }}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: accountColor(acc.id) }} />
-                    <span>{acc.label}</span>
-                  </button>
-                );
-              })}
+          <div className="flex items-center gap-2">
+            <div
+              className="flex items-center gap-2 px-3 h-10 rounded-xl border flex-1 min-w-0"
+              style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+            >
+              <Search className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t('searchPlaceholder')}
+                className="w-full bg-transparent text-[0.84rem] outline-none"
+                style={{ color: 'var(--text-primary)' }}
+              />
             </div>
+            <button
+              type="button"
+              aria-label={t('filterSessions')}
+              aria-expanded={filterOpen}
+              onClick={() => setFilterOpen((value) => !value)}
+              className="relative flex items-center justify-center w-10 h-10 rounded-xl border shrink-0 cursor-pointer"
+              style={{
+                background: filterOpen ? 'var(--accent-soft)' : 'var(--bg-elevated)',
+                borderColor: filterOpen ? 'var(--accent)' : 'var(--border-subtle)',
+                color: filterOpen ? 'var(--accent)' : 'var(--text-secondary)',
+              }}
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              {filtersActive && (
+                <span
+                  className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full"
+                  style={{ background: 'var(--accent)' }}
+                />
+              )}
+            </button>
+          </div>
+
+          {filtersActive && !filterOpen && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 max-w-full px-2.5 h-7 rounded-full text-[0.72rem] font-medium cursor-pointer"
+              style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+            >
+              <span className="truncate">
+                {selectedAccountLabel || t('allAccounts')}
+                {selectedDeviceLabel ? ` · ${selectedDeviceLabel}` : ''}
+              </span>
+              <X className="w-3 h-3 shrink-0" />
+            </button>
           )}
 
-          {/* Device Filter Pills (hidden when already grouped by Device) */}
-          {devices.length > 1 && viewMode !== 'by-device' && (
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar scroll-fade-right pr-6">
-              <button
-                type="button"
-                onClick={() => setSelectedDevice('all')}
-                className="px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
-                style={{
-                  background: selectedDevice === 'all' ? 'var(--text-primary)' : 'var(--bg-elevated)',
-                  color: selectedDevice === 'all' ? 'var(--bg-surface)' : 'var(--text-secondary)',
-                }}
-              >
-                {t('allDevices')}
-              </button>
-              {devices.map((d) => {
-                const active = selectedDevice === d.uuid;
-                return (
+          {filterOpen && (
+            <div
+              className="rounded-xl border p-2.5 space-y-2.5"
+              style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[0.72rem] font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                  {t('filterSessions')}
+                </span>
+                {filtersActive && (
                   <button
-                    key={`${d.accountId}-${d.uuid}`}
                     type="button"
-                    onClick={() => setSelectedDevice(d.uuid)}
-                    className="flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
-                    style={{
-                      background: active ? 'var(--text-primary)' : 'var(--bg-elevated)',
-                      color: active ? 'var(--bg-surface)' : 'var(--text-secondary)',
-                    }}
+                    onClick={clearFilters}
+                    className="text-[0.7rem] font-medium cursor-pointer"
+                    style={{ color: 'var(--accent)' }}
                   >
-                    <span
-                      className="w-1.5 h-1.5 rounded-full"
-                      style={{
-                        background:
-                          d.status === 'RUNNING'
-                            ? 'var(--green)'
-                            : d.status === 'IDLE'
-                              ? 'var(--amber)'
-                              : 'var(--text-muted)',
-                      }}
-                    />
-                    <span>{d.displayName}</span>
+                    {t('clearFilters')}
                   </button>
-                );
-              })}
+                )}
+              </div>
+
+              {accounts.length > 1 && (
+                <div className="space-y-1.5">
+                  <div className="text-[0.68rem] font-medium" style={{ color: 'var(--text-muted)' }}>
+                    {t('filterAccounts')}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAccount('all')}
+                      className="px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
+                      style={{
+                        background: selectedAccount === 'all' ? 'var(--text-primary)' : 'var(--bg-surface)',
+                        color: selectedAccount === 'all' ? 'var(--bg-surface)' : 'var(--text-secondary)',
+                      }}
+                    >
+                      {t('allAccounts')}
+                    </button>
+                    {accounts.map((acc) => {
+                      const active = selectedAccount === acc.id;
+                      return (
+                        <button
+                          key={acc.id}
+                          type="button"
+                          onClick={() => setSelectedAccount(acc.id)}
+                          className="flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
+                          style={{
+                            background: active ? 'var(--text-primary)' : 'var(--bg-surface)',
+                            color: active ? 'var(--bg-surface)' : 'var(--text-secondary)',
+                          }}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ background: accountColor(acc.id) }}
+                          />
+                          <span>{acc.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {devices.length > 1 && (
+                <div className="space-y-1.5">
+                  <div className="text-[0.68rem] font-medium" style={{ color: 'var(--text-muted)' }}>
+                    {t('filterDevices')}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDevice('all')}
+                      className="px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
+                      style={{
+                        background: selectedDevice === 'all' ? 'var(--text-primary)' : 'var(--bg-surface)',
+                        color: selectedDevice === 'all' ? 'var(--bg-surface)' : 'var(--text-secondary)',
+                      }}
+                    >
+                      {t('allDevices')}
+                    </button>
+                    {devices.map((d) => {
+                      const active = selectedDevice === d.uuid;
+                      return (
+                        <button
+                          key={`${d.accountId}-${d.uuid}`}
+                          type="button"
+                          onClick={() => setSelectedDevice(d.uuid)}
+                          className="flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[0.72rem] font-medium shrink-0 cursor-pointer"
+                          style={{
+                            background: active ? 'var(--text-primary)' : 'var(--bg-surface)',
+                            color: active ? 'var(--bg-surface)' : 'var(--text-secondary)',
+                          }}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{
+                              background:
+                                d.status === 'RUNNING'
+                                  ? 'var(--green)'
+                                  : d.status === 'IDLE'
+                                    ? 'var(--amber)'
+                                    : 'var(--text-muted)',
+                            }}
+                          />
+                          <span>{d.displayName}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -475,51 +477,8 @@ export function SessionDrawer({
             <div className="px-3 py-8 text-center text-[0.82rem]" style={{ color: 'var(--text-muted)' }}>
               {t('noSessionsMatch')}
             </div>
-          ) : viewMode === 'unified' || !grouped ? (
-            filtered.map(renderSessionRow)
           ) : (
-            grouped.map((group) => {
-              const isCollapsed = Boolean(collapsedGroups[group.key]);
-              return (
-                <div key={group.key} className="mb-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setCollapsedGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))
-                    }
-                    className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-left cursor-pointer"
-                  >
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      {isCollapsed ? (
-                        <ChevronRight className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
-                      ) : (
-                        <ChevronDown className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
-                      )}
-                      {viewMode === 'by-account' ? (
-                        <User className="w-3.5 h-3.5 shrink-0" style={{ color: group.color }} />
-                      ) : (
-                        <Laptop className="w-3.5 h-3.5 shrink-0" style={{ color: group.color }} />
-                      )}
-                      <span
-                        className="text-[0.76rem] font-bold uppercase tracking-wide truncate"
-                        style={{ color: 'var(--text-secondary)' }}
-                      >
-                        {group.title}
-                      </span>
-                      {group.subtitle && (
-                        <span className="text-[0.68rem] truncate" style={{ color: 'var(--text-muted)' }}>
-                          ({group.subtitle})
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-[0.7rem] font-mono shrink-0" style={{ color: 'var(--text-muted)' }}>
-                      {group.items.length}
-                    </span>
-                  </button>
-                  {!isCollapsed && <div className="space-y-0.5 pl-1">{group.items.map(renderSessionRow)}</div>}
-                </div>
-              );
-            })
+            filtered.map(renderSessionRow)
           )}
         </div>
 
