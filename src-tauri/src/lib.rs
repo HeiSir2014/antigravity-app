@@ -519,6 +519,47 @@ async fn start_cascade(
 }
 
 #[tauri::command]
+async fn read_remote_file(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    device_uuid: String,
+    uri: String,
+) -> Result<Value, String> {
+    state
+        .client
+        .read_remote_file(&account_id, &device_uuid, &uri)
+        .await
+}
+
+#[tauri::command]
+async fn send_all_queued_messages(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    device_uuid: String,
+    cascade_id: String,
+    model: Option<String>,
+) -> Result<Value, String> {
+    state
+        .client
+        .send_all_queued_messages(&account_id, &device_uuid, &cascade_id, model)
+        .await
+}
+
+#[tauri::command]
+async fn delete_queued_user_input_step(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    device_uuid: String,
+    cascade_id: String,
+    step_index: u32,
+) -> Result<Value, String> {
+    state
+        .client
+        .delete_queued_user_input_step(&account_id, &device_uuid, &cascade_id, step_index)
+        .await
+}
+
+#[tauri::command]
 async fn send_user_message(
     state: State<'_, AppState>,
     account_id: String,
@@ -826,6 +867,9 @@ pub fn run() {
             get_trajectory_steps,
             start_cascade,
             send_user_message,
+            read_remote_file,
+            send_all_queued_messages,
+            delete_queued_user_input_step,
             handle_user_interaction,
             cancel_invocation,
             get_model_configs,

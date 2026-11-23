@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   cancelInvocation,
+  deleteQueuedUserInputStep,
   exportVaultJson,
   getModelConfigs,
   getSlashCommands,
@@ -27,6 +28,7 @@ import {
   listAllSessions,
   openGoogleLogin,
   removeAccount,
+  sendAllQueuedMessages,
   sendUserMessage,
   startCascade,
   stopAgentStream,
@@ -55,6 +57,8 @@ import { Composer } from './components/Composer';
 import { formatResetCountdown } from './components/UsagePanel';
 import { SessionDrawer } from './components/SessionDrawer';
 import { TopBar } from './components/TopBar';
+import { registerBackHandler } from './utils/backStack';
+import { matchRemoteModel } from './utils/modelGroups';
 import { createTranslator, I18nContext, resolveLocale, type LocaleCode } from './i18n';
 import {
   DEMO_ACCOUNTS,
@@ -72,6 +76,7 @@ import type {
   ModelOption,
   PendingApproval,
   PermissionMode,
+  QueuedUserMessage,
   SheetDestination,
   TaskChecklistItem,
   ThemeMode,
@@ -236,6 +241,13 @@ export function App() {
     Array<{ title: string; filePath: string; diff: string; additions: number; deletions: number }>
   >([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [remoteQueuedMessages, setRemoteQueuedMessages] = useState<QueuedUserMessage[]>([]);
+  const [localQueuedMessages, setLocalQueuedMessages] = useState<QueuedUserMessage[]>([]);
+  const queuedMessages = useMemo(
+    () => [...remoteQueuedMessages, ...localQueuedMessages],
+    [remoteQueuedMessages, localQueuedMessages]
+  );
+  const wasRunningRef = useRef(false);
   const [isLiveConnected, setIsLiveConnected] = useState(false);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [isTrajectoryLoading, setIsTrajectoryLoading] = useState(false);
@@ -306,11 +318,43 @@ export function App() {
   );
 
   useEffect(() => {
+    if (!commandOpen) return;
+    return registerBackHandler(20, () => {
+      setCommandOpen(false);
+      return true;
+    });
+  }, [commandOpen]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    return registerBackHandler(10, () => {
+      setDrawerOpen(false);
+      return true;
+    });
+  }, [drawerOpen]);
+
+  useEffect(() => {
     localStorage.setItem('agy.theme', theme);
     if (theme === 'system') {
       document.documentElement.removeAttribute('data-theme');
     } else {
       document.documentElement.setAttribute('data-theme', theme);
+    }
+    const syncNativeTheme = () => {
+      const isDark =
+        theme === 'dark' ||
+        (theme === 'system' &&
+          typeof window.matchMedia === 'function' &&
+          window.matchMedia('(prefers-color-scheme: dark)').matches);
+      const bridge = (window as unknown as { AgyAndroidBridge?: { setSystemBarTheme?: (dark: boolean) => boolean } })
+        .AgyAndroidBridge;
+      bridge?.setSystemBarTheme?.(isDark);
+    };
+    syncNativeTheme();
+    if (theme === 'system' && typeof window.matchMedia === 'function') {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      mq.addEventListener?.('change', syncNativeTheme);
+      return () => mq.removeEventListener?.('change', syncNativeTheme);
     }
   }, [theme]);
 
@@ -334,6 +378,8 @@ export function App() {
     setTasks([]);
     setAllDiffs([]);
     setRemoteSlashCommands([]);
+    setRemoteQueuedMessages([]);
+    setLocalQueuedMessages([]);
     setIsRunning(false);
     setIsLiveConnected(false);
     setIsTrajectoryLoading(true);
@@ -372,6 +418,7 @@ export function App() {
       }
     }
     let hadCachedSteps = false;
+    let detectedRemoteModel: string | undefined;
     if (cachedSteps && cachedSteps.length > 0) {
       const norm = normalizeTrajectorySteps(cachedSteps, session.cascadeId);
       if (!isCurrent()) return;
@@ -379,14 +426,38 @@ export function App() {
       setPendingApproval(norm.pendingApproval);
       setAllDiffs(norm.allDiffs);
       setTasks(norm.tasks);
+      detectedRemoteModel = norm.detectedModel;
       hadCachedSteps = true;
     }
 
     const deviceKey = `${session.accountId}::${session.deviceUuid}`;
     const slashKey = `${deviceKey}::${session.cascadeId}`;
-    const applyModels = (mapped: ModelOption[]) => {
+    const sessionModelKey = `agy.sessionModel.${session.cascadeId}`;
+    const deviceModelKey = `agy.deviceModel.${session.deviceUuid}`;
+    const applyModels = (mapped: ModelOption[], remoteHint?: string) => {
       if (!isCurrent() || mapped.length === 0) return;
       setAvailableModels(mapped);
+      const fromRemote = matchRemoteModel(remoteHint, mapped);
+      if (fromRemote) {
+        setActiveModel(fromRemote.displayName);
+        try {
+          localStorage.setItem(sessionModelKey, fromRemote.displayName);
+          localStorage.setItem(deviceModelKey, fromRemote.displayName);
+        } catch {
+          // Ignore storage errors
+        }
+        return;
+      }
+      const savedSession = matchRemoteModel(localStorage.getItem(sessionModelKey), mapped);
+      if (savedSession) {
+        setActiveModel(savedSession.displayName);
+        return;
+      }
+      const savedDevice = matchRemoteModel(localStorage.getItem(deviceModelKey), mapped);
+      if (savedDevice) {
+        setActiveModel(savedDevice.displayName);
+        return;
+      }
       setActiveModel((prev) => {
         const existing = mapped.find((m) => m.displayName === prev || m.id === prev);
         if (existing) return existing.displayName;
@@ -394,7 +465,7 @@ export function App() {
       });
     };
     const cachedModels = modelCacheRef.current.get(deviceKey);
-    if (cachedModels) applyModels(cachedModels);
+    if (cachedModels) applyModels(cachedModels, detectedRemoteModel);
     const cachedSlash = slashCacheRef.current.get(slashKey);
     if (cachedSlash) setRemoteSlashCommands(cachedSlash);
 
@@ -422,7 +493,15 @@ export function App() {
       setPendingApproval(normalized.pendingApproval);
       setAllDiffs(normalized.allDiffs);
       setTasks(normalized.tasks);
+      setRemoteQueuedMessages(normalized.queuedMessages);
       setIsRunning(normalized.isRunning);
+      if (normalized.detectedModel) {
+        detectedRemoteModel = normalized.detectedModel;
+        const latestModels = modelCacheRef.current.get(deviceKey);
+        if (latestModels) {
+          applyModels(latestModels, detectedRemoteModel);
+        }
+      }
 
       if (!cachedModels) {
         void getModelConfigs(session.accountId, session.deviceUuid)
@@ -430,7 +509,7 @@ export function App() {
             const mapped = mapClientModelConfigs(raw);
             if (mapped.length === 0) return;
             modelCacheRef.current.set(deviceKey, mapped);
-            applyModels(mapped);
+            applyModels(mapped, detectedRemoteModel);
           })
           .catch(() => {});
       }
@@ -499,6 +578,7 @@ export function App() {
               setPendingApproval(norm.pendingApproval);
               setAllDiffs(norm.allDiffs);
               setTasks(norm.tasks);
+              setRemoteQueuedMessages(norm.queuedMessages);
               setIsRunning(norm.isRunning);
             })
             .catch(() => {});
@@ -700,6 +780,146 @@ export function App() {
     };
   }, []);
 
+  const handleQueueMessage = (text: string, attachments: MediaAttachment[] = []) => {
+    const trimmed = text.trim();
+    if (!trimmed && attachments.length === 0) return;
+    setLocalQueuedMessages((prev) => [
+      ...prev,
+      {
+        id: `local-q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        stepIndex: -1,
+        text: trimmed,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        localOnly: true,
+      },
+    ]);
+  };
+
+  const handleSendQueuedNow = async (item: QueuedUserMessage) => {
+    if (!activeSession) return;
+    if (item.localOnly) {
+      setLocalQueuedMessages((prev) => prev.filter((q) => q.id !== item.id));
+      await handleSend(item.text, item.attachments || []);
+      return;
+    }
+    setRemoteQueuedMessages((prev) => prev.filter((q) => q.id !== item.id));
+    if (isTauriRuntime() && !activeSession.accountId.startsWith('demo-')) {
+      if (item.stepIndex >= 0) {
+        await deleteQueuedUserInputStep(
+          activeSession.accountId,
+          activeSession.deviceUuid,
+          activeSession.cascadeId,
+          item.stepIndex
+        ).catch(() => {});
+      }
+      await handleSend(item.text, item.attachments || []);
+    }
+  };
+
+  const handleSendAllQueuedNow = async () => {
+    if (!activeSession) return;
+    const locals = [...localQueuedMessages];
+    setLocalQueuedMessages([]);
+    if (
+      remoteQueuedMessages.length > 0 &&
+      isTauriRuntime() &&
+      !activeSession.accountId.startsWith('demo-')
+    ) {
+      await sendAllQueuedMessages(
+        activeSession.accountId,
+        activeSession.deviceUuid,
+        activeSession.cascadeId,
+        activeModelOption?.enumModel
+      ).catch(() => {});
+      setRemoteQueuedMessages([]);
+    }
+    for (const item of locals) {
+      await handleSend(item.text, item.attachments || []);
+    }
+  };
+
+  const handleEditQueued = async (item: QueuedUserMessage, nextText: string) => {
+    if (item.localOnly) {
+      setLocalQueuedMessages((prev) =>
+        prev.map((q) => (q.id === item.id ? { ...q, text: nextText } : q))
+      );
+      return;
+    }
+    setRemoteQueuedMessages((prev) => prev.filter((q) => q.id !== item.id));
+    if (activeSession && isTauriRuntime() && !activeSession.accountId.startsWith('demo-') && item.stepIndex >= 0) {
+      await deleteQueuedUserInputStep(
+        activeSession.accountId,
+        activeSession.deviceUuid,
+        activeSession.cascadeId,
+        item.stepIndex
+      ).catch(() => {});
+    }
+    setLocalQueuedMessages((prev) => [
+      {
+        id: `local-q-edit-${Date.now()}`,
+        stepIndex: -1,
+        text: nextText,
+        attachments: item.attachments,
+        localOnly: true,
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleReorderQueued = (fromIndex: number, toIndex: number) => {
+    const remoteCount = remoteQueuedMessages.length;
+    if (fromIndex < remoteCount || toIndex < remoteCount) {
+      // Reordering local items relative to each other; if remote items exist, reorder within remote view
+      if (fromIndex < remoteCount && toIndex < remoteCount) {
+        setRemoteQueuedMessages((prev) => {
+          const next = [...prev];
+          const [moved] = next.splice(fromIndex, 1);
+          next.splice(toIndex, 0, moved);
+          return next;
+        });
+      }
+      return;
+    }
+    const localFrom = fromIndex - remoteCount;
+    const localTo = toIndex - remoteCount;
+    setLocalQueuedMessages((prev) => {
+      if (localFrom < 0 || localTo < 0 || localFrom >= prev.length || localTo >= prev.length) {
+        return prev;
+      }
+      const next = [...prev];
+      const [moved] = next.splice(localFrom, 1);
+      next.splice(localTo, 0, moved);
+      return next;
+    });
+  };
+
+  const handleDeleteQueued = async (item: QueuedUserMessage) => {
+    if (item.localOnly) {
+      setLocalQueuedMessages((prev) => prev.filter((q) => q.id !== item.id));
+      return;
+    }
+    setRemoteQueuedMessages((prev) => prev.filter((q) => q.id !== item.id));
+    if (activeSession && isTauriRuntime() && !activeSession.accountId.startsWith('demo-') && item.stepIndex >= 0) {
+      await deleteQueuedUserInputStep(
+        activeSession.accountId,
+        activeSession.deviceUuid,
+        activeSession.cascadeId,
+        item.stepIndex
+      ).catch(() => {});
+    }
+  };
+
+  // Auto-dispatch the next pending message in order when the agent finishes its current turn.
+  useEffect(() => {
+    const wasRunning = wasRunningRef.current;
+    wasRunningRef.current = isRunning;
+    if (wasRunning && !isRunning && localQueuedMessages.length > 0 && activeSession) {
+      const [next, ...rest] = localQueuedMessages;
+      setLocalQueuedMessages(rest);
+      void handleSend(next.text, next.attachments || []);
+    }
+  }, [isRunning, localQueuedMessages, activeSession]);
+
   const handleSend = async (text: string, attachments: MediaAttachment[] = []) => {
     if (!activeSession) return;
 
@@ -747,6 +967,7 @@ export function App() {
       const norm = normalizeTrajectorySteps(r.steps || [], activeSession.cascadeId);
       setTimeline(norm.items);
       setPendingApproval(norm.pendingApproval);
+      setRemoteQueuedMessages(norm.queuedMessages);
       setIsRunning(norm.isRunning);
     } catch (err) {
       setIsRunning(false);
@@ -1398,6 +1619,8 @@ export function App() {
             <AgentTimeline
               items={timeline}
               isRunning={isRunning}
+              accountId={activeSession?.accountId}
+              deviceUuid={activeSession?.deviceUuid}
               onOpenSheet={setSheet}
               onAnswerQuestion={(_qId, ans) => void handleSend(ans, [])}
             />
@@ -1469,7 +1692,14 @@ export function App() {
           activeModel={activeModel}
           serverSlashCommands={remoteSlashCommands}
           isRunning={isRunning}
+          queuedMessages={queuedMessages}
           onSend={(t, atts) => void handleSend(t, atts)}
+          onQueueMessage={handleQueueMessage}
+          onSendQueuedNow={(item) => void handleSendQueuedNow(item)}
+          onSendAllQueuedNow={() => void handleSendAllQueuedNow()}
+          onEditQueued={(item, nextText) => void handleEditQueued(item, nextText)}
+          onReorderQueued={handleReorderQueued}
+          onDeleteQueued={(item) => void handleDeleteQueued(item)}
           onStop={() => void handleStop()}
           onOpenPermissionSheet={() => setSheet({ kind: 'PermissionModeSelection' })}
           onOpenModelSheet={() => setSheet({ kind: 'ModelPicker' })}
@@ -1508,7 +1738,17 @@ export function App() {
         onChangeTheme={setTheme}
         onChangeFontSize={setFontSize}
         onChangePermissionMode={setPermissionMode}
-        onChangeModel={setActiveModel}
+        onChangeModel={(nextModel) => {
+          setActiveModel(nextModel);
+          if (activeSession) {
+            try {
+              localStorage.setItem(`agy.sessionModel.${activeSession.cascadeId}`, nextModel);
+              localStorage.setItem(`agy.deviceModel.${activeSession.deviceUuid}`, nextModel);
+            } catch {
+              // Ignore storage errors
+            }
+          }
+        }}
         onSelectSession={(s) => void loadSessionTrajectory(s)}
         onApprove={(scope) => void handleApprovalDecision(true, scope)}
         onDeny={() => void handleApprovalDecision(false)}

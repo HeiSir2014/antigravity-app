@@ -10,6 +10,17 @@ function asStr(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function parseTimeMs(raw: unknown): number | undefined {
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) return parsed;
+  } else if (raw && typeof raw === 'object') {
+    const secs = Number((raw as { seconds?: number | string }).seconds);
+    if (!Number.isNaN(secs) && secs > 0) return secs * 1000;
+  }
+  return undefined;
+}
+
 /**
  * Maps the official `GetCascadeModelConfigsResponse.clientModelConfigs` shape:
  * `{ label, modelOrAlias: { model | alias }, modelId, quotaInfo, disabled, ... }`.
@@ -23,20 +34,21 @@ export function mapClientModelConfigs(raw: unknown): ModelOption[] {
     .map((entry, idx): ModelOption | null => {
       const m = asObj(entry);
       if (!m) return null;
-      const quota = asObj(m.quotaInfo) as
-        | { remainingFraction?: number; resetTime?: string | { seconds?: number | string } }
-        | null;
+      const quota = asObj(m.quotaInfo);
+      const weeklyObj = asObj(quota?.weeklyQuota) || asObj(quota?.longTermQuota) || asObj(m.weeklyQuotaInfo);
       const modelOrAlias = asObj(m.modelOrAlias) as
         | { model?: string; alias?: string }
         | undefined;
-      let resetTimeMs: number | undefined;
-      if (typeof quota?.resetTime === 'string') {
-        const parsed = Date.parse(quota.resetTime);
-        if (!Number.isNaN(parsed)) resetTimeMs = parsed;
-      } else if (quota?.resetTime && typeof quota.resetTime === 'object') {
-        const secs = Number(quota.resetTime.seconds);
-        if (!Number.isNaN(secs) && secs > 0) resetTimeMs = secs * 1000;
-      }
+      const resetTimeMs = parseTimeMs(quota?.resetTime);
+      const weeklyRemainingRaw =
+        quota?.weeklyRemainingFraction ??
+        weeklyObj?.remainingFraction ??
+        m.weeklyRemainingFraction;
+      const weeklyRemainingFraction =
+        typeof weeklyRemainingRaw === 'number' ? weeklyRemainingRaw : undefined;
+      const weeklyResetTimeMs = parseTimeMs(
+        quota?.weeklyResetTime ?? weeklyObj?.resetTime ?? m.weeklyResetTime
+      );
       const enumModel =
         typeof modelOrAlias?.model === 'string' && modelOrAlias.model.startsWith('MODEL_')
           ? modelOrAlias.model
@@ -52,6 +64,8 @@ export function mapClientModelConfigs(raw: unknown): ModelOption[] {
         remainingFraction:
           typeof quota?.remainingFraction === 'number' ? quota.remainingFraction : undefined,
         resetTimeMs,
+        weeklyRemainingFraction,
+        weeklyResetTimeMs,
         isDefault: Boolean(m.isRecommended || m.isDefault),
         disabled: Boolean(m.disabled),
       };

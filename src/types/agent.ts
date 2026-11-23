@@ -72,6 +72,9 @@ export interface ModelQuotaItem {
   remainingFraction?: number | null;
   resetTimeIso?: string | null;
   resetTimeMs?: number | null;
+  weeklyRemainingFraction?: number | null;
+  weeklyResetTimeIso?: string | null;
+  weeklyResetTimeMs?: number | null;
   isDefault: boolean;
   disabled: boolean;
 }
@@ -86,6 +89,9 @@ export interface AccountQuotaSnapshot {
   monthlyPromptCredits?: number | null;
   availableFlowCredits?: number | null;
   monthlyFlowCredits?: number | null;
+  weeklyRemainingFraction?: number | null;
+  weeklyResetTimeIso?: string | null;
+  weeklyResetTimeMs?: number | null;
   onlineDevices: number;
   totalDevices: number;
   sourceDeviceName?: string | null;
@@ -110,12 +116,14 @@ export interface ToolCallDetail {
   summary: string;
   detail: string;
   filePath?: string;
+  lineRange?: string;
   additions?: number;
   deletions?: number;
   diffContent?: string;
   commandLine?: string;
   shellOutput?: string;
   exitCode?: number;
+  attachments?: MediaAttachment[];
   status: 'running' | 'done' | 'error' | 'waiting';
   timestampMs?: number;
 }
@@ -136,6 +144,16 @@ export interface MediaAttachment {
   mimeType: string;
   dataUrl: string;
   base64: string;
+  /** Optional remote workstation file path (`file://...` or `/abs/path`) or HTTP(S) URL. */
+  remoteUri?: string;
+}
+
+export interface QueuedUserMessage {
+  id: string;
+  stepIndex: number;
+  text: string;
+  attachments?: MediaAttachment[];
+  localOnly?: boolean;
 }
 
 export interface ModelOption {
@@ -148,6 +166,8 @@ export interface ModelOption {
   modelId?: string;
   remainingFraction?: number;
   resetTimeMs?: number;
+  weeklyRemainingFraction?: number;
+  weeklyResetTimeMs?: number;
   isDefault?: boolean;
   disabled?: boolean;
 }
@@ -175,7 +195,17 @@ export type TimelineItem =
       stepIndex: number;
       text: string;
       attachments?: MediaAttachment[];
+      queued?: boolean;
       timestampMs?: number;
+    }
+  | {
+      id: string;
+      kind: 'milestone';
+      stepIndex: number;
+      title: string;
+      subtitle?: string;
+      mode?: string;
+      status: 'running' | 'done' | 'error' | 'waiting';
     }
   | {
       id: string;

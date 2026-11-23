@@ -7,11 +7,16 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
+  Clock,
   Copy,
   FileCode2,
   FileText,
+  Flag,
   Gauge,
+  Globe,
+  Image as ImageIcon,
   Loader2,
+  Plug,
   Search,
   Sparkles,
   Terminal,
@@ -25,10 +30,13 @@ import type {
   ToolCallDetail,
 } from '../types/agent';
 import { MarkdownView } from './MarkdownView';
+import { SmartImage } from './SmartImage';
 
 interface AgentTimelineProps {
   items: TimelineItem[];
   isRunning: boolean;
+  accountId?: string;
+  deviceUuid?: string;
   onOpenSheet: (sheet: SheetDestination) => void;
   onAnswerQuestion?: (questionId: string, answer: string) => void;
 }
@@ -66,6 +74,7 @@ function groupTimelineItems(items: TimelineItem[]): RenderBlock[] {
   for (const item of items) {
     if (
       item.kind === 'tool' &&
+      (!item.tool.attachments || item.tool.attachments.length === 0) &&
       (item.tool.category === 'read' || item.tool.category === 'search' || item.tool.category === 'other')
     ) {
       pendingGroup.push(item.tool);
@@ -135,7 +144,19 @@ function ThinkingCard({
   );
 }
 
-function AssistantMessageBlock({ markdown, isStreaming }: { markdown: string; isStreaming?: boolean }) {
+function AssistantMessageBlock({
+  markdown,
+  isStreaming,
+  accountId,
+  deviceUuid,
+  onPreviewImage,
+}: {
+  markdown: string;
+  isStreaming?: boolean;
+  accountId?: string;
+  deviceUuid?: string;
+  onPreviewImage: (src: string, title: string) => void;
+}) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
 
@@ -148,7 +169,12 @@ function AssistantMessageBlock({ markdown, isStreaming }: { markdown: string; is
 
   return (
     <div className="px-1 py-0.5 group">
-      <MarkdownView markdown={markdown} />
+      <MarkdownView
+        markdown={markdown}
+        accountId={accountId}
+        deviceUuid={deviceUuid}
+        onPreviewImage={onPreviewImage}
+      />
       {isStreaming && (
         <span
           className="inline-block w-2 h-4 ml-1 align-middle rounded-sm animate-pulse"
@@ -281,8 +307,15 @@ function AskUserQuestionCard({
   );
 }
 
-export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion }: AgentTimelineProps) {
-  const { t } = useI18n();
+export function AgentTimeline({
+  items,
+  isRunning,
+  accountId,
+  deviceUuid,
+  onOpenSheet,
+  onAnswerQuestion,
+}: AgentTimelineProps) {
+  const { t, resolved } = useI18n();
   const scrollRef = useRef<HTMLElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [showScrollFab, setShowScrollFab] = useState(false);
@@ -363,25 +396,36 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                     style={{
                       fontSize: 'calc(0.93rem * var(--agy-font-scale))',
                       background: 'var(--bg-elevated)',
-                      border: '1px solid var(--border-subtle)',
+                      border: `1px solid ${item.queued ? 'var(--amber)' : 'var(--border-subtle)'}`,
                       color: 'var(--text-primary)',
                     }}
                   >
+                    {item.queued && (
+                      <div
+                        className="inline-flex items-center gap-1 text-[0.68rem] font-semibold px-1.5 py-0.5 rounded-full"
+                        style={{ background: 'rgba(245, 158, 11, 0.14)', color: 'var(--amber)' }}
+                      >
+                        <Clock className="w-3 h-3" />
+                        <span>{resolved === 'en' ? 'Queued' : '排队中'}</span>
+                      </div>
+                    )}
                     {item.attachments && item.attachments.length > 0 && (
                       <div className="flex flex-wrap gap-1.5">
                         {item.attachments.map((att) =>
                           att.mimeType.startsWith('image/') ? (
-                            <button
+                            <SmartImage
                               key={att.id}
-                              type="button"
-                              onClick={() =>
-                                onOpenSheet({ kind: 'ImagePreview', src: att.dataUrl, title: att.name })
+                              src={att.dataUrl}
+                              remoteUri={att.remoteUri}
+                              mimeType={att.mimeType}
+                              alt={att.name}
+                              accountId={accountId}
+                              deviceUuid={deviceUuid}
+                              className="w-24 h-24 object-cover"
+                              onClick={(resolvedSrc) =>
+                                onOpenSheet({ kind: 'ImagePreview', src: resolvedSrc, title: att.name })
                               }
-                              className="rounded-xl overflow-hidden border cursor-pointer"
-                              style={{ borderColor: 'var(--border-subtle)' }}
-                            >
-                              <img src={att.dataUrl} alt={att.name} className="w-24 h-24 object-cover" />
-                            </button>
+                            />
                           ) : (
                             <span
                               key={att.id}
@@ -396,6 +440,39 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                     )}
                     {item.text && <div>{item.text}</div>}
                   </div>
+                </div>
+              );
+            }
+
+            if (item.kind === 'milestone') {
+              return (
+                <div
+                  key={item.id}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl border text-[0.76rem]"
+                  style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <Flag className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent)' }} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {item.mode && (
+                        <span
+                          className="px-1.5 py-0.25 rounded text-[0.62rem] font-mono font-semibold uppercase shrink-0"
+                          style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+                        >
+                          {item.mode}
+                        </span>
+                      )}
+                      <span className="font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+                        {item.title}
+                      </span>
+                    </div>
+                    {item.subtitle && (
+                      <div className="text-[0.7rem] truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        {item.subtitle}
+                      </div>
+                    )}
+                  </div>
+                  <StatusIcon status={item.status} />
                 </div>
               );
             }
@@ -547,6 +624,54 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                 );
               }
 
+              if (tool.attachments && tool.attachments.length > 0) {
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-2xl border p-3 space-y-2"
+                    style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <ImageIcon className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent)' }} />
+                        <span className="text-[0.8rem] font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
+                          {tool.name}: {tool.summary}
+                        </span>
+                      </div>
+                      <StatusIcon status={tool.status} />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {tool.attachments.map((att) => (
+                        <SmartImage
+                          key={att.id}
+                          src={att.dataUrl}
+                          remoteUri={att.remoteUri}
+                          mimeType={att.mimeType}
+                          alt={att.name}
+                          accountId={accountId}
+                          deviceUuid={deviceUuid}
+                          className="max-w-full max-h-56 object-contain"
+                          onClick={(resolvedSrc) =>
+                            onOpenSheet({ kind: 'ImagePreview', src: resolvedSrc, title: att.name })
+                          }
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              const ToolIcon =
+                tool.category === 'browser'
+                  ? Globe
+                  : tool.category === 'mcp'
+                    ? Plug
+                    : tool.category === 'read'
+                      ? FileText
+                      : tool.category === 'search'
+                        ? Search
+                        : Wrench;
+
               return (
                 <button
                   key={item.id}
@@ -562,10 +687,18 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                   style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <Wrench className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
+                    <ToolIcon className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
                     <span className="text-[0.8rem] font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
                       {tool.name}: {tool.summary}
                     </span>
+                    {tool.lineRange && (
+                      <span
+                        className="px-1.5 py-0.25 rounded text-[0.66rem] font-mono shrink-0"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}
+                      >
+                        {tool.lineRange}
+                      </span>
+                    )}
                   </div>
                   <StatusIcon status={tool.status} />
                 </button>
@@ -658,6 +791,9 @@ export function AgentTimeline({ items, isRunning, onOpenSheet, onAnswerQuestion 
                 key={item.id}
                 markdown={item.markdown}
                 isStreaming={item.isStreaming}
+                accountId={accountId}
+                deviceUuid={deviceUuid}
+                onPreviewImage={(src, title) => onOpenSheet({ kind: 'ImagePreview', src, title })}
               />
             );
           })

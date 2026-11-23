@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -24,6 +26,9 @@ import {
 } from 'lucide-react';
 import { useI18n, type LocaleCode } from '../i18n';
 import { accountColor } from '../utils/colors';
+import { registerBackHandler } from '../utils/backStack';
+import { parseDiffIntoHunks, type ParsedDiffLine } from '../utils/diffHunks';
+import { groupModelsByFamily, parseModelVariant } from '../utils/modelGroups';
 import {
   checkAppUpdate,
   downloadAppUpdate,
@@ -91,41 +96,229 @@ interface BottomSheetProps {
   onSyncPull: () => Promise<void>;
 }
 
-function DiffLines({ diff }: { diff: string }) {
-  const lines = (diff || '').split('\n');
+function DiffRow({
+  line,
+  rowRef,
+}: {
+  line: ParsedDiffLine;
+  rowRef?: (el: HTMLDivElement | null) => void;
+}) {
+  const isAdd = line.kind === 'add';
+  const isDel = line.kind === 'del';
+  const isHunk = line.kind === 'hunk';
+  const isMeta = line.kind === 'meta';
+  const prefix = isAdd ? '+' : isDel ? '-' : isHunk || isMeta ? '' : ' ';
+
   return (
-    <pre
-      className="rounded-xl p-3 text-[0.76rem] font-mono overflow-x-auto leading-relaxed border"
-      style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+    <div
+      ref={rowRef}
+      className="flex items-stretch whitespace-pre min-w-max"
+      style={{
+        background: isAdd
+          ? 'rgba(34, 197, 94, 0.14)'
+          : isDel
+            ? 'rgba(239, 68, 68, 0.14)'
+            : isHunk
+              ? 'rgba(59, 130, 246, 0.08)'
+              : 'transparent',
+        color: isAdd
+          ? 'var(--green)'
+          : isDel
+            ? 'var(--red)'
+            : isHunk
+              ? 'var(--blue)'
+              : isMeta
+                ? 'var(--text-muted)'
+                : 'var(--text-primary)',
+      }}
     >
-      {lines.map((line, i) => {
-        const isAdd = line.startsWith('+') && !line.startsWith('+++');
-        const isDel = line.startsWith('-') && !line.startsWith('---');
-        const isHunk = line.startsWith('@@');
-        return (
-          <div
-            key={i}
-            className="px-1.5 -mx-1.5 rounded-sm whitespace-pre"
-            style={{
-              background: isAdd
-                ? 'rgba(34, 197, 94, 0.14)'
-                : isDel
-                  ? 'rgba(239, 68, 68, 0.14)'
-                  : 'transparent',
-              color: isAdd
-                ? 'var(--green)'
-                : isDel
-                  ? 'var(--red)'
-                  : isHunk
-                    ? 'var(--blue)'
-                    : 'var(--text-primary)',
-            }}
-          >
-            {line || ' '}
+      <span
+        className="w-9 pr-1.5 text-right select-none shrink-0 text-[0.68rem] opacity-55"
+        style={{ borderRight: '1px solid var(--border-subtle)' }}
+      >
+        {line.oldLine ?? ''}
+      </span>
+      <span
+        className="w-9 pr-1.5 text-right select-none shrink-0 text-[0.68rem] opacity-55"
+        style={{ borderRight: '1px solid var(--border-subtle)' }}
+      >
+        {line.newLine ?? ''}
+      </span>
+      <span className="w-4 text-center select-none shrink-0 font-semibold">{prefix}</span>
+      <span className="pr-3">{line.text || ' '}</span>
+    </div>
+  );
+}
+
+function DiffLines({ diff }: { diff: string }) {
+  const { resolved } = useI18n();
+  const parsed = useMemo(() => parseDiffIntoHunks(diff, 3), [diff]);
+  const [showFullFile, setShowFullFile] = useState(false);
+  const [expandedBlocks, setExpandedBlocks] = useState<Record<string, boolean>>({});
+  const [activeHunk, setActiveHunk] = useState(0);
+  const hunkRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const firstChangeRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setShowFullFile(false);
+    setExpandedBlocks({});
+    setActiveHunk(0);
+    hunkRefs.current = [];
+    firstChangeRef.current = null;
+  }, [diff]);
+
+  // Auto-scroll directly to the first edited line when the diff opens.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      const target = firstChangeRef.current || hunkRefs.current[0];
+      target?.scrollIntoView({ block: 'center', behavior: 'auto' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [diff, showFullFile]);
+
+  const jumpToHunk = (nextIdx: number) => {
+    if (parsed.hunkCount <= 0) return;
+    const wrapped = (nextIdx + parsed.hunkCount) % parsed.hunkCount;
+    setActiveHunk(wrapped);
+    hunkRefs.current[wrapped]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  return (
+    <div className="space-y-2">
+      {(parsed.hunkCount > 0 || parsed.hasCollapsibleContext) && (
+        <div
+          className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border text-[0.72rem]"
+          style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+        >
+          <div className="flex items-center gap-1.5">
+            {parsed.hunkCount > 0 && (
+              <>
+                <span className="font-mono font-medium" style={{ color: 'var(--text-secondary)' }}>
+                  {resolved === 'en'
+                    ? `Change ${Math.min(activeHunk + 1, parsed.hunkCount)}/${parsed.hunkCount}`
+                    : `第 ${Math.min(activeHunk + 1, parsed.hunkCount)}/${parsed.hunkCount} 处变更`}
+                </span>
+                {parsed.hunkCount > 1 && (
+                  <div className="flex items-center gap-0.5 ml-1">
+                    <button
+                      type="button"
+                      onClick={() => jumpToHunk(activeHunk - 1)}
+                      aria-label="Previous change"
+                      className="flex items-center justify-center w-6 h-6 rounded-md cursor-pointer active:scale-95"
+                      style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => jumpToHunk(activeHunk + 1)}
+                      aria-label="Next change"
+                      className="flex items-center justify-center w-6 h-6 rounded-md cursor-pointer active:scale-95"
+                      style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
-        );
-      })}
-    </pre>
+          {parsed.hasCollapsibleContext && (
+            <button
+              type="button"
+              onClick={() => setShowFullFile((v) => !v)}
+              className="px-2 py-0.5 rounded-md font-medium cursor-pointer active:opacity-75"
+              style={{ background: 'var(--bg-elevated)', color: 'var(--accent)' }}
+            >
+              {showFullFile
+                ? resolved === 'en'
+                  ? 'Changes only'
+                  : '仅看变更'
+                : resolved === 'en'
+                  ? `Full file (${parsed.allLines.length}L)`
+                  : `完整文件 (${parsed.allLines.length} 行)`}
+            </button>
+          )}
+        </div>
+      )}
+
+      <div
+        className="rounded-xl py-2 text-[0.75rem] font-mono overflow-x-auto leading-relaxed border max-h-[58dvh] overflow-y-auto"
+        style={{ background: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+      >
+        {showFullFile
+          ? parsed.allLines.map((line) => (
+              <DiffRow
+                key={line.index}
+                line={line}
+                rowRef={
+                  line.index === parsed.firstChangeIndex
+                    ? (el) => {
+                        firstChangeRef.current = el;
+                      }
+                    : undefined
+                }
+              />
+            ))
+          : parsed.blocks.map((block) => {
+              if (block.kind === 'collapsed') {
+                if (expandedBlocks[block.id]) {
+                  return block.lines.map((line) => <DiffRow key={line.index} line={line} />);
+                }
+                return (
+                  <button
+                    key={block.id}
+                    type="button"
+                    onClick={() => setExpandedBlocks((prev) => ({ ...prev, [block.id]: true }))}
+                    className="w-full text-left px-3 py-1 text-[0.71rem] cursor-pointer active:opacity-75 border-y my-0.5"
+                    style={{
+                      background: 'var(--bg-surface)',
+                      color: 'var(--text-muted)',
+                      borderColor: 'var(--border-subtle)',
+                    }}
+                  >
+                    {resolved === 'en'
+                      ? `⋯ Expand ${block.hiddenCount} unchanged lines`
+                      : `⋯ 展开 ${block.hiddenCount} 行未修改代码`}
+                  </button>
+                );
+              }
+              return (
+                <div key={`hunk-${block.hunkIndex}`}>
+                  {block.startNewLine !== null && parsed.hasCollapsibleContext && (
+                    <div
+                      className="px-3 py-0.5 text-[0.68rem] select-none"
+                      style={{
+                        background: 'rgba(59, 130, 246, 0.08)',
+                        color: 'var(--blue)',
+                      }}
+                    >
+                      @@ L{block.startNewLine} @@
+                    </div>
+                  )}
+                  {block.lines.map((line) => {
+                    const isHunkAnchor = line.index === block.firstChangeLineIndex;
+                    const isGlobalFirst = line.index === parsed.firstChangeIndex;
+                    return (
+                      <DiffRow
+                        key={line.index}
+                        line={line}
+                        rowRef={
+                          isHunkAnchor || isGlobalFirst
+                            ? (el) => {
+                                if (isHunkAnchor) hunkRefs.current[block.hunkIndex] = el;
+                                if (isGlobalFirst) firstChangeRef.current = el;
+                              }
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              );
+            })}
+      </div>
+    </div>
   );
 }
 
@@ -164,7 +357,7 @@ export function BottomSheet({
   onSyncPush,
   onSyncPull,
 }: BottomSheetProps) {
-  const { t, locale, setLocale } = useI18n();
+  const { t, resolved, locale, setLocale } = useI18n();
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const [subPage, setSubPage] = useState<SettingsSubPage>('overview');
   const [dragOffsetY, setDragOffsetY] = useState(0);
@@ -186,6 +379,16 @@ export function BottomSheet({
   const [subagentItems, setSubagentItems] = useState<TimelineItem[]>([]);
   const [subagentLoading, setSubagentLoading] = useState(false);
   const [subagentError, setSubagentError] = useState('');
+
+  const [expandedModelFamily, setExpandedModelFamily] = useState<string | null>(null);
+  const groupedModels = useMemo(() => groupModelsByFamily(availableModels), [availableModels]);
+  const activeParsedModel = useMemo(() => parseModelVariant(activeModel), [activeModel]);
+
+  useEffect(() => {
+    if (sheet?.kind === 'ModelPicker') {
+      setExpandedModelFamily(activeParsedModel.familyName);
+    }
+  }, [sheet?.kind, activeParsedModel.familyName]);
 
   useEffect(() => {
     setSyncServerInput(syncStatus.serverUrl);
@@ -232,6 +435,20 @@ export function BottomSheet({
       }
     }
   }, [sheet]);
+
+  // Layered Android system Back handling for BottomSheet & Settings sub-pages
+  useEffect(() => {
+    if (!sheet) return;
+    return registerBackHandler(25, () => {
+      if (sheet.kind === 'Settings' && subPage !== 'overview') {
+        setStatusMsg('');
+        setSubPage(subPage === 'add-account' ? 'accounts' : 'overview');
+        return true;
+      }
+      onClose();
+      return true;
+    });
+  }, [sheet, subPage, onClose]);
 
   if (!sheet) {
     return <dialog ref={dialogRef} className="agy-sheet" />;
@@ -513,59 +730,188 @@ export function BottomSheet({
           )}
 
           {sheet.kind === 'ModelPicker' && (
-            <div className="space-y-2">
-              {availableModels.map((m) => {
-                const active = m.displayName === activeModel || m.id === activeModel;
+            <div className="space-y-2.5">
+              {groupedModels.map((group) => {
+                const isActiveFamily = group.variants.some(
+                  (v) => v.option.displayName === activeModel || v.option.id === activeModel
+                );
+                const hasMultipleVariants = group.variants.length > 1;
+                const isExpanded =
+                  hasMultipleVariants &&
+                  (expandedModelFamily === group.familyName ||
+                    (expandedModelFamily === null && isActiveFamily));
                 const pct =
-                  typeof m.remainingFraction === 'number'
-                    ? Math.round(Math.max(0, Math.min(1, m.remainingFraction)) * 100)
+                  typeof group.remainingFraction === 'number'
+                    ? Math.round(Math.max(0, Math.min(1, group.remainingFraction)) * 100)
                     : null;
+                const weeklyPct =
+                  typeof group.weeklyRemainingFraction === 'number'
+                    ? Math.round(Math.max(0, Math.min(1, group.weeklyRemainingFraction)) * 100)
+                    : null;
+
                 return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    disabled={m.disabled}
-                    onClick={() => {
-                      if (m.disabled) return;
-                      onChangeModel(m.displayName);
-                      onClose();
-                    }}
-                    className={`w-full p-3.5 rounded-2xl border text-left space-y-1.5 ${
-                      m.disabled ? 'opacity-50 cursor-not-allowed' : 'active:scale-[0.99] cursor-pointer'
+                  <div
+                    key={group.familyName}
+                    className={`rounded-2xl border overflow-hidden transition-colors ${
+                      group.disabled ? 'opacity-50' : ''
                     }`}
                     style={{
-                      background: active ? 'var(--accent-soft)' : 'var(--bg-elevated)',
-                      borderColor: active ? 'var(--accent)' : 'var(--border-subtle)',
+                      background: isActiveFamily ? 'var(--accent-soft)' : 'var(--bg-elevated)',
+                      borderColor: isActiveFamily ? 'var(--accent)' : 'var(--border-subtle)',
                     }}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[0.9rem] font-semibold">{m.displayName}</span>
-                      <div className="flex items-center gap-2">
-                        {pct !== null && (
-                          <span className="text-[0.72rem] font-mono" style={{ color: 'var(--text-secondary)' }}>
-                            {t('quotaRemaining', { pct })}
+                    <button
+                      type="button"
+                      disabled={group.disabled}
+                      onClick={() => {
+                        if (group.disabled) return;
+                        if (!hasMultipleVariants) {
+                          onChangeModel(group.variants[0].option.displayName);
+                          onClose();
+                          return;
+                        }
+                        setExpandedModelFamily((prev) =>
+                          prev === group.familyName ? '' : group.familyName
+                        );
+                      }}
+                      className={`w-full p-3.5 text-left space-y-1.5 ${
+                        group.disabled ? 'cursor-not-allowed' : 'active:opacity-80 cursor-pointer'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-[0.9rem] font-semibold truncate">
+                            {group.familyName}
                           </span>
-                        )}
-                        {active && <Check className="w-4.5 h-4.5" style={{ color: 'var(--accent)' }} />}
+                          {isActiveFamily && activeParsedModel.shortBadge && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded-full text-[0.65rem] font-semibold"
+                              style={{ background: 'var(--bg-surface)', color: 'var(--accent)' }}
+                            >
+                              {activeParsedModel.thinkingLevel || activeParsedModel.shortBadge}
+                            </span>
+                          )}
+                          {hasMultipleVariants && !isActiveFamily && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded-full text-[0.65rem] font-medium"
+                              style={{
+                                background: 'var(--bg-surface)',
+                                color: 'var(--text-muted)',
+                              }}
+                            >
+                              {group.variants.length}{' '}
+                              {resolved === 'en' ? 'levels' : '档思考'}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {pct !== null && (
+                            <span
+                              className="text-[0.72rem] font-mono"
+                              style={{ color: 'var(--text-secondary)' }}
+                            >
+                              5h {pct}%
+                            </span>
+                          )}
+                          {weeklyPct !== null && (
+                            <span
+                              className="text-[0.72rem] font-mono"
+                              style={{ color: 'var(--text-muted)' }}
+                            >
+                              {resolved === 'en' ? `7d ${weeklyPct}%` : `周 ${weeklyPct}%`}
+                            </span>
+                          )}
+                          {hasMultipleVariants ? (
+                            <ChevronRight
+                              className={`w-4 h-4 transition-transform ${
+                                isExpanded ? 'rotate-90' : ''
+                              }`}
+                              style={{ color: 'var(--text-muted)' }}
+                            />
+                          ) : (
+                            isActiveFamily && (
+                              <Check className="w-4.5 h-4.5" style={{ color: 'var(--accent)' }} />
+                            )
+                          )}
+                        </div>
                       </div>
-                    </div>
-                    {m.description && (
-                      <div className="text-[0.76rem]" style={{ color: 'var(--text-secondary)' }}>
-                        {m.description}
-                      </div>
-                    )}
-                    {pct !== null && (
-                      <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-subtle)' }}>
+                      {group.description && (
+                        <div className="text-[0.76rem]" style={{ color: 'var(--text-secondary)' }}>
+                          {group.description}
+                        </div>
+                      )}
+                      {pct !== null && (
                         <div
-                          className="h-full rounded-full"
-                          style={{
-                            width: `${pct}%`,
-                            background: pct > 30 ? 'var(--green)' : pct > 10 ? 'var(--amber)' : 'var(--red)',
-                          }}
-                        />
+                          className="w-full h-1.5 rounded-full overflow-hidden"
+                          style={{ background: 'var(--bg-subtle)' }}
+                        >
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${pct}%`,
+                              background:
+                                pct > 30
+                                  ? 'var(--green)'
+                                  : pct > 10
+                                    ? 'var(--amber)'
+                                    : 'var(--red)',
+                            }}
+                          />
+                        </div>
+                      )}
+                    </button>
+
+                    {isExpanded && hasMultipleVariants && (
+                      <div
+                        className="px-3.5 pb-3 pt-2 border-t space-y-1.5"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          background: 'var(--bg-surface)',
+                        }}
+                      >
+                        <div
+                          className="text-[0.7rem] font-semibold uppercase tracking-wide"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          {resolved === 'en' ? 'Thinking Effort' : '思考级别'}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {group.variants.map(({ option, parsed }) => {
+                            const selected =
+                              option.displayName === activeModel || option.id === activeModel;
+                            const label =
+                              parsed.thinkingLevel ||
+                              (resolved === 'en' ? 'Standard' : '标准');
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                disabled={option.disabled}
+                                onClick={() => {
+                                  if (option.disabled) return;
+                                  onChangeModel(option.displayName);
+                                  onClose();
+                                }}
+                                className={`inline-flex items-center gap-1.5 px-3 h-8 rounded-xl text-[0.78rem] font-semibold border transition-all ${
+                                  option.disabled
+                                    ? 'opacity-45 cursor-not-allowed'
+                                    : 'active:scale-95 cursor-pointer'
+                                }`}
+                                style={{
+                                  background: selected ? 'var(--accent)' : 'var(--bg-elevated)',
+                                  borderColor: selected ? 'var(--accent)' : 'var(--border-subtle)',
+                                  color: selected ? '#ffffff' : 'var(--text-primary)',
+                                }}
+                              >
+                                <span>{label}</span>
+                                {selected && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>

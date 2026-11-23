@@ -244,6 +244,121 @@ export async function cancelInvocation(
   return invoke('cancel_invocation', { accountId, deviceUuid, cascadeId });
 }
 
+export async function readRemoteFile(
+  accountId: string,
+  deviceUuid: string,
+  uri: string
+): Promise<Record<string, unknown>> {
+  return invoke<Record<string, unknown>>('read_remote_file', { accountId, deviceUuid, uri });
+}
+
+export async function sendAllQueuedMessages(
+  accountId: string,
+  deviceUuid: string,
+  cascadeId: string,
+  model?: string
+): Promise<unknown> {
+  return invoke('send_all_queued_messages', { accountId, deviceUuid, cascadeId, model });
+}
+
+export async function deleteQueuedUserInputStep(
+  accountId: string,
+  deviceUuid: string,
+  cascadeId: string,
+  stepIndex: number
+): Promise<unknown> {
+  return invoke('delete_queued_user_input_step', {
+    accountId,
+    deviceUuid,
+    cascadeId,
+    stepIndex,
+  });
+}
+
+const remoteMediaCache = new Map<string, string>();
+const MAX_REMOTE_MEDIA_CACHE = 64;
+
+export function inferImageMimeType(pathOrUrl: string, fallback = 'image/png'): string {
+  const clean = pathOrUrl.split('?')[0].split('#')[0].toLowerCase();
+  if (clean.endsWith('.jpg') || clean.endsWith('.jpeg')) return 'image/jpeg';
+  if (clean.endsWith('.webp')) return 'image/webp';
+  if (clean.endsWith('.gif')) return 'image/gif';
+  if (clean.endsWith('.svg')) return 'image/svg+xml';
+  if (clean.endsWith('.bmp')) return 'image/bmp';
+  if (clean.endsWith('.avif')) return 'image/avif';
+  if (clean.endsWith('.png')) return 'image/png';
+  return fallback;
+}
+
+export function isRemoteFileUri(src: string): boolean {
+  const trimmed = (src || '').trim();
+  if (!trimmed) return false;
+  if (
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('blob:')
+  ) {
+    return false;
+  }
+  return (
+    trimmed.startsWith('file://') ||
+    trimmed.startsWith('/') ||
+    /^[a-zA-Z]:[\\/]/.test(trimmed)
+  );
+}
+
+/**
+ * Resolves a remote workstation image file path (`file://...` or `/abs/path`) into a
+ * browser-renderable `data:<mime>;base64,...` URL via `ReadFile` ProxyCommand with LRU caching.
+ */
+export async function resolveRemoteImageSrc(
+  accountId: string,
+  deviceUuid: string,
+  uri: string,
+  mimeHint?: string
+): Promise<string | null> {
+  if (!isTauriRuntime() || !accountId || !deviceUuid || !uri) return null;
+  const cacheKey = `${accountId}::${deviceUuid}::${uri}`;
+  const cached = remoteMediaCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const resp = await readRemoteFile(accountId, deviceUuid, uri);
+    const raw =
+      (typeof resp?.contents === 'string' && resp.contents) ||
+      (typeof resp?.content === 'string' && resp.content) ||
+      (typeof resp?.data === 'string' && resp.data) ||
+      (typeof resp?.inlineData === 'string' && resp.inlineData) ||
+      (typeof resp?.bytes === 'string' && resp.bytes) ||
+      '';
+    if (!raw) return null;
+
+    const mime =
+      (typeof resp?.mimeType === 'string' && resp.mimeType) ||
+      mimeHint ||
+      inferImageMimeType(uri);
+
+    let dataUrl: string;
+    if (raw.startsWith('data:')) {
+      dataUrl = raw;
+    } else if (mime === 'image/svg+xml' && raw.trim().startsWith('<')) {
+      dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}`;
+    } else {
+      dataUrl = `data:${mime};base64,${raw.replace(/\s+/g, '')}`;
+    }
+
+    remoteMediaCache.set(cacheKey, dataUrl);
+    if (remoteMediaCache.size > MAX_REMOTE_MEDIA_CACHE) {
+      const oldest = remoteMediaCache.keys().next().value;
+      if (oldest) remoteMediaCache.delete(oldest);
+    }
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
 export async function getModelConfigs(accountId: string, deviceUuid: string): Promise<unknown> {
   return invoke('get_model_configs', { accountId, deviceUuid });
 }

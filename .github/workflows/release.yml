@@ -96,7 +96,13 @@ jobs:
             - **Live Model & Slash Commands**: Falls back to `GetAvailableModels` when a workspace-runner LS returns an empty model catalog, and sends the resolved default model to `GetSlashCommands`.
             - **Android Notification Approval**: Approve / Deny / Deny-with-comment actions now cross the native bridge and resolve the pending interaction, with a WebKit-cookie login fallback.
             - **Two-Tier Auto-Updater**: ~140 KB incremental `web-bundle.tar.gz` delta updates + SHA-256 verified full native installers.
-            - **v2.0.9 Fix**: Google profile identity is resolved from `ListAccounts` (email, display name, avatar) and persisted; existing `Google Account N` entries are auto-repaired on startup without needing a paired workstation.
+            - **v2.1.0 Release Highlights**:
+              - **Network Resilience**: TCP/HTTP2 keep-alive and automatic retry with backoff for transient `ProxyCommand` / `ListInstances` network errors.
+              - **Mobile Keyboard & Navigation**: Touch/mobile IME shows Enter/Newline (`enterKeyHint="enter"`) instead of Send; Android top edge-to-edge double-inset blank bar eliminated; layered system Back stack closes popups/sheets/drawer before backgrounding; Recents task persistence (`moveTaskToBack` + `autoRemoveFromRecents="false"`).
+              - **Semantic History & Full-Source Image Rendering**: Renders base64, HTTP(S) URLs, and workstation local image files (`ReadFile` proxy + LRU cache) across user messages, Markdown, `GENERATE_IMAGE`, and browser screenshots; semantic cards for all major agent step types.
+              - **Multi-Item Pending Queue**: Queue or Send Now while agent is busy; inline edit, reorder up/down, delete, and one-tap Send Now on any queued item.
+              - **2-Level Model + Thinking Picker & 5h/Weekly Quota**: Groups models by family with a Thinking Effort sub-selector, anti-overflow thinking badge in composer, auto-syncs remote session active model, and displays both 5-hour and weekly usage quotas.
+              - **Hunk-Based File Diff Viewer**: Dual 1-based line numbers, collapsible unchanged context, hunk navigation, and auto-scroll to the first edited line.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

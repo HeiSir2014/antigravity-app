@@ -46,6 +46,9 @@ pub struct ModelQuotaItem {
     pub remaining_fraction: Option<f64>,
     pub reset_time_iso: Option<String>,
     pub reset_time_ms: Option<u64>,
+    pub weekly_remaining_fraction: Option<f64>,
+    pub weekly_reset_time_iso: Option<String>,
+    pub weekly_reset_time_ms: Option<u64>,
     pub is_default: bool,
     pub disabled: bool,
 }
@@ -62,6 +65,9 @@ pub struct AccountQuotaSnapshot {
     pub monthly_prompt_credits: Option<i64>,
     pub available_flow_credits: Option<i64>,
     pub monthly_flow_credits: Option<i64>,
+    pub weekly_remaining_fraction: Option<f64>,
+    pub weekly_reset_time_iso: Option<String>,
+    pub weekly_reset_time_ms: Option<u64>,
     pub online_devices: usize,
     pub total_devices: usize,
     pub source_device_name: Option<String>,
@@ -249,13 +255,44 @@ fn build_send_user_message_body(
     body
 }
 
+fn is_read_only_rpc_method(method_name: &str) -> bool {
+    method_name.starts_with("Get")
+        || method_name.starts_with("Search")
+        || method_name.starts_with("List")
+}
+
+fn format_reqwest_error(err: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut parts = vec![err.to_string()];
+    let mut cur = err.source();
+    while let Some(src) = cur {
+        let text = src.to_string();
+        if !parts.last().is_some_and(|prev| prev.contains(&text)) {
+            parts.push(text);
+        }
+        cur = src.source();
+    }
+    parts.join(": ")
+}
+
+fn is_retryable_network_error(err: &reqwest::Error, is_read_only: bool) -> bool {
+    if err.is_connect() {
+        return true;
+    }
+    is_read_only && (err.is_timeout() || err.is_request() || err.is_body() || err.is_decode())
+}
+
 impl AntigravityClient {
     pub fn new(auth: Arc<AuthStore>) -> Self {
         let http = reqwest::Client::builder()
             .use_rustls_tls()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
-            .pool_idle_timeout(std::time::Duration::from_secs(45))
+            .pool_idle_timeout(std::time::Duration::from_secs(20))
+            .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
+            .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
             .build()
             .expect("Failed to build reqwest client");
@@ -554,26 +591,52 @@ impl AntigravityClient {
         account: &AccountRecord,
     ) -> Result<Vec<DeviceInstance>, String> {
         let mut active_account = account.clone();
-        for attempt in 0..2 {
+        let mut rotated_on_401 = false;
+        let mut last_err = String::from("ListInstances failed after retry");
+        for attempt in 0..3 {
             let headers = self.build_jspb_headers_for(&active_account).await?;
 
-            let resp = self
+            let resp = match self
                 .http
                 .post(LIST_INSTANCES_URL)
                 .headers(headers)
                 .body("[]")
                 .send()
                 .await
-                .map_err(|e| format!("ListInstances network error: {e}"))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("ListInstances network error: {}", format_reqwest_error(&e));
+                    if attempt < 2 && is_retryable_network_error(&e, true) {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            350 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
             let status = resp.status();
             let _ = self.capture_set_cookies(&active_account.id, false, resp.headers());
-            let raw_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("ListInstances read error: {e}"))?;
+            let raw_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    last_err = format!("ListInstances read error: {}", format_reqwest_error(&e));
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            350 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
-            if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+            if status == reqwest::StatusCode::UNAUTHORIZED && !rotated_on_401 {
+                rotated_on_401 = true;
                 // Attempt silent RotateCookies recovery once before reporting SESSION_EXPIRED
                 if matches!(
                     self.rotate_cookies_for_account(&active_account.id).await,
@@ -597,7 +660,15 @@ impl AntigravityClient {
             if !status.is_success() {
                 let err_preview = String::from_utf8_lossy(&raw_bytes);
                 let short: String = err_preview.chars().take(240).collect();
-                return Err(format!("ListInstances HTTP {status}: {short}"));
+                last_err = format!("ListInstances HTTP {status}: {short}");
+                if matches!(status.as_u16(), 502 | 503 | 504) && attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        500 * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(last_err);
             }
 
             // Parse Google JSPB array response: [[ [uuid, [name, version, chunking], status, [sec, nanos]], ... ]]
@@ -621,7 +692,7 @@ impl AntigravityClient {
             }
             return Ok(list);
         }
-        Err("ListInstances failed after retry".to_string())
+        Err(last_err)
     }
 
     pub async fn list_instances(
@@ -675,27 +746,57 @@ impl AntigravityClient {
         .map_err(|e| e.to_string())?;
 
         let method_name = rpc_path.rsplit('/').next().unwrap_or("rpc");
+        let is_read_only = is_read_only_rpc_method(method_name);
         let url = format!("{PROXY_COMMAND_URL}?$unique={method_name}");
 
         let mut last_err = String::new();
         let mut rotated_on_401 = false;
         for attempt in 0..3 {
             let headers = self.build_jspb_headers_for(&active_account).await?;
-            let resp = self
+            let resp = match self
                 .http
                 .post(&url)
                 .headers(headers)
                 .body(jspb_body.clone())
                 .send()
                 .await
-                .map_err(|e| format!("ProxyCommand({method_name}) network error: {e}"))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!(
+                        "ProxyCommand({method_name}) network error: {}",
+                        format_reqwest_error(&e)
+                    );
+                    if attempt < 2 && is_retryable_network_error(&e, is_read_only) {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            350 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
             let status = resp.status();
             let _ = self.capture_set_cookies(&active_account.id, false, resp.headers());
-            let raw_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("ProxyCommand({method_name}) read error: {e}"))?;
+            let raw_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    last_err = format!(
+                        "ProxyCommand({method_name}) read error: {}",
+                        format_reqwest_error(&e)
+                    );
+                    if attempt < 2 && is_read_only {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            350 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
             if status == reqwest::StatusCode::UNAUTHORIZED && !rotated_on_401 {
                 rotated_on_401 = true;
@@ -719,8 +820,17 @@ impl AntigravityClient {
                 let preview = String::from_utf8_lossy(&raw_bytes);
                 let short: String = preview.chars().take(240).collect();
                 last_err = format!("ProxyCommand({method_name}) HTTP {status}: {short}");
-                if preview.contains("TUNNEL_UNAVAILABLE") && attempt < 2 {
-                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                let transient_gateway =
+                    is_read_only && matches!(status.as_u16(), 502 | 503 | 504);
+                if (preview.contains("TUNNEL_UNAVAILABLE") || transient_gateway) && attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        if preview.contains("TUNNEL_UNAVAILABLE") {
+                            1200
+                        } else {
+                            500 * (attempt as u64 + 1)
+                        },
+                    ))
+                    .await;
                     continue;
                 }
                 return Err(last_err);
@@ -1023,6 +1133,9 @@ impl AntigravityClient {
                         monthly_prompt_credits: None,
                         available_flow_credits: None,
                         monthly_flow_credits: None,
+                        weekly_remaining_fraction: None,
+                        weekly_reset_time_iso: None,
+                        weekly_reset_time_ms: None,
                         online_devices: 0,
                         total_devices: 0,
                         source_device_name: None,
@@ -1052,6 +1165,9 @@ impl AntigravityClient {
                     monthly_prompt_credits: None,
                     available_flow_credits: None,
                     monthly_flow_credits: None,
+                    weekly_remaining_fraction: None,
+                    weekly_reset_time_iso: None,
+                    weekly_reset_time_ms: None,
                     online_devices: 0,
                     total_devices,
                     source_device_name: None,
@@ -1076,7 +1192,14 @@ impl AntigravityClient {
                 "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
                 json!({}),
             );
-            let (user_res, models_res) = tokio::join!(user_fut, models_fut);
+            let quota_summary_fut = self.proxy_unary_json_with_account(
+                &account,
+                &primary_dev.uuid,
+                "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+                json!({}),
+            );
+            let (user_res, models_res, quota_summary_res) =
+                tokio::join!(user_fut, models_fut, quota_summary_fut);
 
             let mut email = account.email.clone();
             let mut plan_name: Option<String> = None;
@@ -1085,6 +1208,9 @@ impl AntigravityClient {
             let mut monthly_prompt_credits: Option<i64> = None;
             let mut available_flow_credits: Option<i64> = None;
             let mut monthly_flow_credits: Option<i64> = None;
+            let mut weekly_remaining_fraction: Option<f64> = None;
+            let mut weekly_reset_time_iso: Option<String> = None;
+            let mut weekly_reset_time_ms: Option<u64> = None;
             let mut models: Vec<ModelQuotaItem> = Vec::new();
             let mut err_code: Option<String> = None;
             let mut err_msg: Option<String> = None;
@@ -1148,12 +1274,31 @@ impl AntigravityClient {
                     }
                 }
             } else if models.is_empty() {
-                if let Err(e) = models_res {
-                    err_code = Some(classify_account_error(&e).to_string());
-                    err_msg = Some(e);
-                } else if let Err(e) = user_res {
-                    err_code = Some(classify_account_error(&e).to_string());
-                    err_msg = Some(e);
+                if let Err(ref e) = models_res {
+                    err_code = Some(classify_account_error(e).to_string());
+                    err_msg = Some(e.clone());
+                } else if let Err(ref e) = user_res {
+                    err_code = Some(classify_account_error(e).to_string());
+                    err_msg = Some(e.clone());
+                }
+            }
+
+            if let Ok(ref sval) = quota_summary_res {
+                let (w_frac, w_iso, w_ms) = extract_weekly_quota_from_value(sval);
+                if w_frac.is_some() {
+                    weekly_remaining_fraction = w_frac;
+                    weekly_reset_time_iso = w_iso;
+                    weekly_reset_time_ms = w_ms;
+                }
+            }
+            if weekly_remaining_fraction.is_none() {
+                if let Ok(ref uval) = user_res {
+                    let (w_frac, w_iso, w_ms) = extract_weekly_quota_from_value(uval);
+                    if w_frac.is_some() {
+                        weekly_remaining_fraction = w_frac;
+                        weekly_reset_time_iso = w_iso;
+                        weekly_reset_time_ms = w_ms;
+                    }
                 }
             }
 
@@ -1167,6 +1312,9 @@ impl AntigravityClient {
                 monthly_prompt_credits,
                 available_flow_credits,
                 monthly_flow_credits,
+                weekly_remaining_fraction,
+                weekly_reset_time_iso,
+                weekly_reset_time_ms,
                 online_devices,
                 total_devices,
                 source_device_name: Some(primary_dev.display_name.clone()),
@@ -1373,6 +1521,73 @@ impl AntigravityClient {
             json!({
                 "cascadeId": cascade_id,
                 "interaction": interaction
+            }),
+        )
+        .await
+    }
+
+    pub async fn read_remote_file(
+        &self,
+        account_id: &str,
+        device_uuid: &str,
+        uri: &str,
+    ) -> Result<Value, String> {
+        let normalized_uri = if uri.starts_with("file://") {
+            uri.to_string()
+        } else if uri.starts_with('/') {
+            format!("file://{uri}")
+        } else {
+            uri.to_string()
+        };
+        self.proxy_unary_json(
+            account_id,
+            device_uuid,
+            "/exa.language_server_pb.LanguageServerService/ReadFile",
+            json!({ "uri": normalized_uri }),
+        )
+        .await
+    }
+
+    pub async fn send_all_queued_messages(
+        &self,
+        account_id: &str,
+        device_uuid: &str,
+        cascade_id: &str,
+        model: Option<String>,
+    ) -> Result<Value, String> {
+        let mut body = json!({ "cascadeId": cascade_id });
+        if let Some(m) = model {
+            if !m.is_empty() {
+                body["cascadeConfig"] = json!({
+                    "plannerConfig": {
+                        "requestedModel": { "model": m }
+                    }
+                });
+            }
+        }
+        self.proxy_unary_json(
+            account_id,
+            device_uuid,
+            "/exa.language_server_pb.LanguageServerService/SendAllQueuedMessages",
+            body,
+        )
+        .await
+    }
+
+    pub async fn delete_queued_user_input_step(
+        &self,
+        account_id: &str,
+        device_uuid: &str,
+        cascade_id: &str,
+        step_index: u32,
+    ) -> Result<Value, String> {
+        self.proxy_unary_json(
+            account_id,
+            device_uuid,
+            "/exa.language_server_pb.LanguageServerService/DeleteQueuedUserInputStep",
+            json!({
+                "cascadeId": cascade_id,
+                "stepIndex": step_index
             }),
         )
         .await
@@ -1606,6 +1821,77 @@ fn classify_account_error(err: &str) -> &'static str {
     }
 }
 
+fn extract_weekly_quota_from_value(val: &Value) -> (Option<f64>, Option<String>, Option<u64>) {
+    let root = val
+        .get("quotaSummary")
+        .or_else(|| val.get("userStatus"))
+        .or_else(|| val.get("summary"))
+        .unwrap_or(val);
+
+    let direct_weekly = root
+        .get("weeklyQuota")
+        .or_else(|| root.get("longTermQuota"))
+        .or_else(|| root.get("weeklyLimit"))
+        .or_else(|| root.get("weeklyUsage"));
+
+    if let Some(w) = direct_weekly {
+        let frac = w
+            .get("remainingFraction")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                w.get("usedFraction")
+                    .and_then(|v| v.as_f64())
+                    .map(|used| (1.0 - used).clamp(0.0, 1.0))
+            });
+        let reset_val = w
+            .get("resetTime")
+            .or_else(|| w.get("resetTimestamp"))
+            .or_else(|| w.get("quotaResetTime"));
+        let iso = reset_val.and_then(|v| v.as_str()).map(|s| s.to_string());
+        let ms = parse_proto_timestamp_ms(reset_val);
+        if frac.is_some() {
+            return (frac, iso, if ms > 0 { Some(ms) } else { None });
+        }
+    }
+
+    // Check buckets array (e.g. quotaBuckets / buckets with type WEEKLY / LONG_TERM or >24h reset)
+    if let Some(buckets) = root
+        .get("quotaBuckets")
+        .or_else(|| root.get("buckets"))
+        .and_then(|v| v.as_array())
+    {
+        for b in buckets {
+            let kind = b
+                .get("bucketType")
+                .or_else(|| b.get("quotaBucketType"))
+                .or_else(|| b.get("window"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let is_weekly = kind.contains("WEEK") || kind.contains("LONG_TERM") || kind == "1";
+            if !is_weekly {
+                continue;
+            }
+            let frac = b
+                .get("remainingFraction")
+                .and_then(|v| v.as_f64())
+                .or_else(|| {
+                    b.get("usedFraction")
+                        .and_then(|v| v.as_f64())
+                        .map(|used| (1.0 - used).clamp(0.0, 1.0))
+                });
+            let reset_val = b.get("resetTime").or_else(|| b.get("resetTimestamp"));
+            let iso = reset_val.and_then(|v| v.as_str()).map(|s| s.to_string());
+            let ms = parse_proto_timestamp_ms(reset_val);
+            if frac.is_some() {
+                return (frac, iso, if ms > 0 { Some(ms) } else { None });
+            }
+        }
+    }
+
+    (None, None, None)
+}
+
 fn parse_model_quota_list(list: &[Value]) -> Vec<ModelQuotaItem> {
     list.iter()
         .enumerate()
@@ -1643,6 +1929,31 @@ fn parse_model_quota_list(list: &[Value]) -> Vec<ModelQuotaItem> {
                     None
                 }
             };
+            let weekly_obj = quota
+                .and_then(|q| q.get("weeklyQuota").or_else(|| q.get("longTermQuota")))
+                .or_else(|| m.get("weeklyQuotaInfo"));
+            let weekly_remaining_fraction = quota
+                .and_then(|q| q.get("weeklyRemainingFraction"))
+                .and_then(|v| v.as_f64())
+                .or_else(|| {
+                    weekly_obj
+                        .and_then(|w| w.get("remainingFraction"))
+                        .and_then(|v| v.as_f64())
+                });
+            let weekly_reset_val = quota
+                .and_then(|q| q.get("weeklyResetTime"))
+                .or_else(|| weekly_obj.and_then(|w| w.get("resetTime")));
+            let weekly_reset_time_iso = weekly_reset_val
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let weekly_reset_time_ms = {
+                let ms = parse_proto_timestamp_ms(weekly_reset_val);
+                if ms > 0 {
+                    Some(ms)
+                } else {
+                    None
+                }
+            };
             let is_default = m
                 .get("isDefault")
                 .and_then(|v| v.as_bool())
@@ -1656,6 +1967,9 @@ fn parse_model_quota_list(list: &[Value]) -> Vec<ModelQuotaItem> {
                 remaining_fraction,
                 reset_time_iso,
                 reset_time_ms,
+                weekly_remaining_fraction,
+                weekly_reset_time_iso,
+                weekly_reset_time_ms,
                 is_default,
                 disabled,
             }
@@ -2105,5 +2419,16 @@ mod tests {
                 Err(error) => println!("slash_commands_error={error}"),
             }
         }
+    }
+
+    #[test]
+    fn read_only_rpc_classification() {
+        assert!(is_read_only_rpc_method("GetCascadeTrajectorySteps"));
+        assert!(is_read_only_rpc_method("GetAllCascadeTrajectories"));
+        assert!(is_read_only_rpc_method("SearchConversations"));
+        assert!(is_read_only_rpc_method("ListInstances"));
+        assert!(!is_read_only_rpc_method("SendUserCascadeMessage"));
+        assert!(!is_read_only_rpc_method("StartCascade"));
+        assert!(!is_read_only_rpc_method("CancelCascadeInvocation"));
     }
 }

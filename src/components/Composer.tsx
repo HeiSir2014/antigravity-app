@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, Cpu, ImagePlus, Plus, Shield, Sparkles, Square, X } from 'lucide-react';
+import { ArrowUp, Clock, Cpu, ImagePlus, Plus, Shield, Sparkles, Square, X, Zap } from 'lucide-react';
 import { useI18n } from '../i18n';
-import type { MediaAttachment, PermissionMode } from '../types/agent';
+import { registerBackHandler } from '../utils/backStack';
+import { parseModelVariant } from '../utils/modelGroups';
+import type { MediaAttachment, PermissionMode, QueuedUserMessage } from '../types/agent';
+import { PendingQueueTray } from './PendingQueueTray';
 
 interface ComposerProps {
   permissionMode: PermissionMode;
   activeModel: string;
   serverSlashCommands?: Array<{ cmd: string; desc: string }>;
   isRunning: boolean;
+  queuedMessages?: QueuedUserMessage[];
   onSend: (text: string, attachments: MediaAttachment[]) => void;
+  onQueueMessage?: (text: string, attachments: MediaAttachment[]) => void;
+  onSendQueuedNow?: (item: QueuedUserMessage) => void;
+  onSendAllQueuedNow?: () => void;
+  onEditQueued?: (item: QueuedUserMessage, nextText: string) => void;
+  onReorderQueued?: (fromIndex: number, toIndex: number) => void;
+  onDeleteQueued?: (item: QueuedUserMessage) => void;
   onStop: () => void;
   onOpenPermissionSheet: () => void;
   onOpenModelSheet: () => void;
@@ -24,27 +34,56 @@ export function Composer({
   activeModel,
   serverSlashCommands,
   isRunning,
+  queuedMessages = [],
   onSend,
+  onQueueMessage,
+  onSendQueuedNow,
+  onSendAllQueuedNow,
+  onEditQueued,
+  onReorderQueued,
+  onDeleteQueued,
   onStop,
   onOpenPermissionSheet,
   onOpenModelSheet,
 }: ComposerProps) {
-  const { t } = useI18n();
+  const { t, resolved } = useI18n();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [isTouchDevice, setIsTouchDevice] = useState(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return false;
+    }
+    return window.matchMedia('(pointer: coarse)').matches;
+  });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const lastCompositionEndRef = useRef(0);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(pointer: coarse)');
+    const onChange = (event: MediaQueryListEvent) => setIsTouchDevice(event.matches);
+    setIsTouchDevice(mq.matches);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, []);
+
+  useEffect(() => {
     if (!menuOpen) return;
     const closeOnOutside = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
+    const unregisterBack = registerBackHandler(40, () => {
+      setMenuOpen(false);
+      return true;
+    });
     document.addEventListener('pointerdown', closeOnOutside);
-    return () => document.removeEventListener('pointerdown', closeOnOutside);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutside);
+      unregisterBack();
+    };
   }, [menuOpen]);
 
   const slashCommands = useMemo<SlashCommandDef[]>(() => {
@@ -119,15 +158,23 @@ export function Composer({
     setAttachments((prev) => [...prev, ...loaded].slice(0, 4));
   };
 
-  const handleSubmit = () => {
-    const trimmed = text.trim();
-    if (!trimmed && attachments.length === 0) return;
-    onSend(trimmed, attachments);
+  const clearComposer = () => {
     setText('');
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = '40px';
     }
+  };
+
+  const handleSubmit = (mode: 'auto' | 'queue' | 'immediate' = 'auto') => {
+    const trimmed = text.trim();
+    if (!trimmed && attachments.length === 0) return;
+    if ((mode === 'queue' || (mode === 'auto' && isRunning)) && onQueueMessage) {
+      onQueueMessage(trimmed, attachments);
+    } else {
+      onSend(trimmed, attachments);
+    }
+    clearComposer();
   };
 
   return (
@@ -140,6 +187,16 @@ export function Composer({
       }}
     >
       <div className="relative max-w-3xl mx-auto w-full">
+      {queuedMessages.length > 0 && onSendQueuedNow && onEditQueued && onReorderQueued && onDeleteQueued && (
+        <PendingQueueTray
+          items={queuedMessages}
+          onSendNow={onSendQueuedNow}
+          onSendAllNow={onSendAllQueuedNow}
+          onEdit={onEditQueued}
+          onReorder={onReorderQueued}
+          onDelete={onDeleteQueued}
+        />
+      )}
       {/* Floating Intelligent Slash Command Autocomplete Palette */}
       {slashSuggestions.length > 0 && (
         <div
@@ -209,7 +266,7 @@ export function Composer({
           ref={textareaRef}
           rows={1}
           value={text}
-          enterKeyHint="send"
+          enterKeyHint={isTouchDevice ? 'enter' : 'send'}
           inputMode="text"
           autoCapitalize="sentences"
           onChange={(e) => {
@@ -234,9 +291,20 @@ export function Composer({
               return;
             }
 
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSubmit();
+            if (e.key === 'Enter') {
+              if (isTouchDevice) {
+                // On touch/mobile devices, Enter inserts a newline (IME shows Enter/Return);
+                // only Cmd/Ctrl+Enter (hardware keyboard) or the Send button submits.
+                if (e.metaKey || e.ctrlKey) {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+                return;
+              }
+              if (!e.shiftKey) {
+                e.preventDefault();
+                handleSubmit();
+              }
             }
           }}
           placeholder={t('composerPlaceholder')}
@@ -311,18 +379,35 @@ export function Composer({
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={onOpenModelSheet}
-              className="flex items-center gap-1 h-7.5 px-2.5 rounded-full text-[0.74rem] font-medium truncate max-w-[140px] active:scale-95 cursor-pointer"
-              style={{
-                background: 'var(--bg-elevated)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <Cpu className="w-3 h-3 shrink-0" />
-              <span className="truncate">{activeModel}</span>
-            </button>
+            {(() => {
+              const parsedModel = parseModelVariant(activeModel);
+              return (
+                <button
+                  type="button"
+                  onClick={onOpenModelSheet}
+                  title={activeModel}
+                  className="flex items-center gap-1.5 h-7.5 px-2.5 rounded-full text-[0.74rem] font-medium max-w-[230px] sm:max-w-[280px] min-w-0 active:scale-95 cursor-pointer"
+                  style={{
+                    background: 'var(--bg-elevated)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <Cpu className="w-3 h-3 shrink-0" />
+                  <span className="truncate min-w-0">{parsedModel.familyName}</span>
+                  {parsedModel.shortBadge && (
+                    <span
+                      className="shrink-0 px-1.5 py-0.25 rounded-full text-[0.65rem] font-semibold leading-tight"
+                      style={{
+                        background: 'var(--accent-soft)',
+                        color: 'var(--accent)',
+                      }}
+                    >
+                      {parsedModel.shortBadge}
+                    </span>
+                  )}
+                </button>
+              );
+            })()}
           </div>
 
           {isRunning && !text.trim() && attachments.length === 0 ? (
@@ -338,11 +423,41 @@ export function Composer({
             >
               <Square className="w-3.5 h-3.5 fill-current" />
             </button>
+          ) : isRunning && (text.trim() || attachments.length > 0) && onQueueMessage ? (
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleSubmit('immediate')}
+                title={resolved === 'en' ? 'Send immediately' : '立即发送'}
+                className="inline-flex items-center gap-1 h-8.5 px-2.5 rounded-full text-[0.72rem] font-semibold border active:scale-95 transition-transform cursor-pointer"
+                style={{
+                  background: 'var(--bg-elevated)',
+                  borderColor: 'var(--border-strong)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <Zap className="w-3.5 h-3.5" style={{ color: 'var(--accent)' }} />
+                <span>{resolved === 'en' ? 'Now' : '立发'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSubmit('queue')}
+                title={resolved === 'en' ? 'Add to pending queue' : '排队发送'}
+                className="inline-flex items-center gap-1 h-8.5 px-3 rounded-full text-[0.74rem] font-semibold active:scale-95 transition-transform cursor-pointer"
+                style={{
+                  background: 'var(--accent)',
+                  color: '#ffffff',
+                }}
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span>{resolved === 'en' ? 'Queue' : '排队'}</span>
+              </button>
+            </div>
           ) : (
             <button
               type="button"
               disabled={!text.trim() && attachments.length === 0}
-              onClick={handleSubmit}
+              onClick={() => handleSubmit('immediate')}
               aria-label="Send message"
               className="flex items-center justify-center w-9 h-9 rounded-full active:scale-90 transition-transform cursor-pointer disabled:opacity-35 shrink-0"
               style={{

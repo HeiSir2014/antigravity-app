@@ -8,6 +8,7 @@ import type {
   QuotaDashboardSnapshot,
 } from '../types/agent';
 import { accountColor } from '../utils/colors';
+import { parseModelVariant } from '../utils/modelGroups';
 
 interface UsagePanelProps {
   demoMode: boolean;
@@ -64,6 +65,8 @@ function buildDemoQuotaSnapshot(accounts: AccountSummary[]): QuotaDashboardSnaps
       monthlyPromptCredits: index === 0 ? 500 : 250,
       availableFlowCredits: index === 0 ? 1180 : 320,
       monthlyFlowCredits: index === 0 ? 1500 : 500,
+      weeklyRemainingFraction: index === 0 ? 0.74 : 0.48,
+      weeklyResetTimeMs: now + 4 * 24 * 3600 * 1000,
       onlineDevices: 1,
       totalDevices: 1,
       sourceDeviceName: 'Workstation',
@@ -74,6 +77,8 @@ function buildDemoQuotaSnapshot(accounts: AccountSummary[]): QuotaDashboardSnaps
           description: 'Balanced coding & reasoning',
           remainingFraction: 0.88,
           resetTimeMs: now + 3 * 3600 * 1000,
+          weeklyRemainingFraction: 0.78,
+          weeklyResetTimeMs: now + 4 * 24 * 3600 * 1000,
           isDefault: true,
           disabled: false,
         },
@@ -83,6 +88,8 @@ function buildDemoQuotaSnapshot(accounts: AccountSummary[]): QuotaDashboardSnaps
           description: 'Everyday software engineering',
           remainingFraction: 0.64,
           resetTimeMs: now + 2 * 3600 * 1000,
+          weeklyRemainingFraction: 0.52,
+          weeklyResetTimeMs: now + 4 * 24 * 3600 * 1000,
           isDefault: false,
           disabled: false,
         },
@@ -101,7 +108,7 @@ function AccountUsage({
   item: AccountQuotaSnapshot;
   onOpenAccountSettings: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, resolved } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const color = accountColor(item.accountId);
   const hasError = Boolean(item.errorCode);
@@ -111,17 +118,51 @@ function AccountUsage({
       : item.errorCode === 'NO_ONLINE_DEVICE'
         ? t('usageNoOnlineDevice')
         : t('usageUnavailable');
+
+  // Deduplicate thinking-level variants into model families for a cleaner quota view.
+  const groupedModels = useMemo(() => {
+    const byFamily = new Map<string, (typeof item.models)[number]>();
+    for (const model of item.models) {
+      const family = parseModelVariant(model.displayName).familyName;
+      const key = family.toLowerCase();
+      const existing = byFamily.get(key);
+      if (!existing) {
+        byFamily.set(key, { ...model, displayName: family });
+      } else {
+        const nextFrac =
+          typeof existing.remainingFraction === 'number' && typeof model.remainingFraction === 'number'
+            ? Math.min(existing.remainingFraction, model.remainingFraction)
+            : existing.remainingFraction ?? model.remainingFraction;
+        const nextWeekly =
+          typeof existing.weeklyRemainingFraction === 'number' &&
+          typeof model.weeklyRemainingFraction === 'number'
+            ? Math.min(existing.weeklyRemainingFraction, model.weeklyRemainingFraction)
+            : existing.weeklyRemainingFraction ?? model.weeklyRemainingFraction;
+        byFamily.set(key, {
+          ...existing,
+          remainingFraction: nextFrac,
+          resetTimeMs: existing.resetTimeMs || model.resetTimeMs,
+          weeklyRemainingFraction: nextWeekly,
+          weeklyResetTimeMs: existing.weeklyResetTimeMs || model.weeklyResetTimeMs,
+          isDefault: existing.isDefault || model.isDefault,
+        });
+      }
+    }
+    return Array.from(byFamily.values());
+  }, [item.models]);
+
   const visibleModels = useMemo(() => {
-    if (expanded) return item.models;
-    const meaningful = item.models.filter(
+    if (expanded) return groupedModels;
+    const meaningful = groupedModels.filter(
       (model) =>
         model.isDefault ||
         typeof model.remainingFraction !== 'number' ||
-        model.remainingFraction <= 0.95
+        model.remainingFraction <= 0.95 ||
+        (typeof model.weeklyRemainingFraction === 'number' && model.weeklyRemainingFraction <= 0.95)
     );
-    return meaningful.slice(0, 5);
-  }, [expanded, item.models]);
-  const hasMore = item.models.length > visibleModels.length;
+    return (meaningful.length > 0 ? meaningful : groupedModels).slice(0, 6);
+  }, [expanded, groupedModels]);
+  const hasMore = groupedModels.length > visibleModels.length;
 
   return (
     <section className="space-y-3.5">
@@ -214,7 +255,41 @@ function AccountUsage({
         </div>
       )}
 
-      {item.models.length > 0 && (
+      {typeof item.weeklyRemainingFraction === 'number' && (
+        <div
+          className="rounded-xl border px-3 py-2.5 space-y-1.5"
+          style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-elevated)' }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[0.78rem] font-semibold">
+              {resolved === 'en' ? 'Weekly Usage Limit' : '周用量限额'}
+            </span>
+            <span
+              className="text-[0.74rem] font-mono font-semibold"
+              style={{ color: quotaColor(item.weeklyRemainingFraction) }}
+            >
+              {Math.round(Math.max(0, Math.min(1, item.weeklyRemainingFraction)) * 100)}%
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${Math.max(Math.round(Math.max(0, Math.min(1, item.weeklyRemainingFraction)) * 100), 1)}%`,
+                background: quotaColor(item.weeklyRemainingFraction),
+              }}
+            />
+          </div>
+          {item.weeklyResetTimeMs && (
+            <div className="flex items-center gap-1 text-[0.68rem]" style={{ color: 'var(--text-muted)' }}>
+              <Clock className="w-3 h-3" />
+              {t('quotaResetIn', { time: formatResetCountdown(item.weeklyResetTimeMs) })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {groupedModels.length > 0 && (
         <div className="space-y-1.5">
           {visibleModels.map((model) => {
             const hasFraction = typeof model.remainingFraction === 'number';
@@ -223,13 +298,19 @@ function AccountUsage({
               : 1;
             const percent = Math.round(fraction * 100);
             const reset = formatResetCountdown(model.resetTimeMs);
+            const hasWeekly = typeof model.weeklyRemainingFraction === 'number';
+            const weeklyFraction = hasWeekly
+              ? Math.max(0, Math.min(1, model.weeklyRemainingFraction!))
+              : 1;
+            const weeklyPercent = Math.round(weeklyFraction * 100);
+            const weeklyReset = formatResetCountdown(model.weeklyResetTimeMs);
             return (
               <div
                 key={model.id}
-                className="rounded-xl border px-3 py-2.5 space-y-1.5"
+                className="rounded-xl border px-3 py-2.5 space-y-2"
                 style={{
                   borderColor:
-                    hasFraction && fraction < 0.2
+                    (hasFraction && fraction < 0.2) || (hasWeekly && weeklyFraction < 0.2)
                       ? 'rgba(220, 38, 38, 0.22)'
                       : 'var(--border-subtle)',
                   background: 'var(--bg-elevated)',
@@ -251,21 +332,56 @@ function AccountUsage({
                     className="text-[0.74rem] font-mono font-semibold shrink-0"
                     style={{ color: hasFraction ? quotaColor(fraction) : 'var(--text-secondary)' }}
                   >
-                    {hasFraction ? (percent <= 0 ? t('quotaExhaustedBadge') : `${percent}%`) : '—'}
+                    {hasFraction
+                      ? percent <= 0
+                        ? t('quotaExhaustedBadge')
+                        : `${resolved === 'en' ? '5h' : '5小时'} ${percent}%`
+                      : '—'}
                   </span>
                 </div>
                 {hasFraction && (
-                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{ width: `${Math.max(percent, 1)}%`, background: quotaColor(fraction) }}
-                    />
+                  <div className="space-y-1">
+                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{ width: `${Math.max(percent, 1)}%`, background: quotaColor(fraction) }}
+                      />
+                    </div>
+                    {reset && (
+                      <div className="flex items-center gap-1 text-[0.68rem]" style={{ color: 'var(--text-muted)' }}>
+                        <Clock className="w-3 h-3" />
+                        {resolved === 'en' ? '5h window · ' : '5小时窗口 · '}
+                        {t('quotaResetIn', { time: reset })}
+                      </div>
+                    )}
                   </div>
                 )}
-                {reset && (
-                  <div className="flex items-center gap-1 text-[0.68rem]" style={{ color: 'var(--text-muted)' }}>
-                    <Clock className="w-3 h-3" />
-                    {t('quotaResetIn', { time: reset })}
+                {hasWeekly && (
+                  <div className="space-y-1 pt-1 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                    <div className="flex items-center justify-between text-[0.7rem]">
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {resolved === 'en' ? 'Weekly limit' : '周用量'}
+                      </span>
+                      <span
+                        className="font-mono font-semibold"
+                        style={{ color: quotaColor(weeklyFraction) }}
+                      >
+                        {weeklyPercent <= 0 ? t('quotaExhaustedBadge') : `${weeklyPercent}%`}
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{ width: `${Math.max(weeklyPercent, 1)}%`, background: quotaColor(weeklyFraction) }}
+                      />
+                    </div>
+                    {weeklyReset && (
+                      <div className="flex items-center gap-1 text-[0.68rem]" style={{ color: 'var(--text-muted)' }}>
+                        <Clock className="w-3 h-3" />
+                        {resolved === 'en' ? 'Weekly · ' : '周重置 · '}
+                        {t('quotaResetIn', { time: weeklyReset })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -278,7 +394,7 @@ function AccountUsage({
               className="w-full py-2 text-[0.75rem] font-medium cursor-pointer"
               style={{ color: 'var(--accent)' }}
             >
-              {expanded ? t('usageShowLess') : t('usageShowAll', { count: item.models.length })}
+              {expanded ? t('usageShowLess') : t('usageShowAll', { count: groupedModels.length })}
             </button>
           )}
         </div>
