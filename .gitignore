@@ -3,9 +3,12 @@ node_modules/
 dist/
 .DS_Store
 
-# Binaries & Packages
+# Binaries, Packages & Signing Keys
 *.apk
 *.aab
+*.jks
+*.keystore
+*.p12
 
 # Rust / Tauri
 src-tauri/target/
