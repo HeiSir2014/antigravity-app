@@ -10,6 +10,12 @@
 </p>
 
 <p align="center">
+  <a href="https://antigravity.yterm.cn/"><strong>Web Portal &amp; Download Hub</strong></a> ·
+  <a href="https://github.com/HeiSir2014/antigravity-app/releases/latest"><strong>Latest Release (v2.1.2)</strong></a> ·
+  <a href="docs/PROTOCOL.md"><strong>Protocol Docs</strong></a>
+</p>
+
+<p align="center">
   <em>100% of the codebase in this repository was engineered and authored by <strong>Gemini 4 Neon</strong>.</em>
 </p>
 
@@ -31,18 +37,22 @@
 
 - **Pure-Native Protocol Engine (Rust)**:
   - Extracted the underlying `boq-jetski` gRPC-Web Binary (`ListInstances`, `ProxyCommand`, `StreamProxyCommand`) and `exa.language_server_pb.LanguageServerService` protocols directly into Rust (`reqwest` HTTP/2 + `rustls`, zero CORS, zero WebView DOM injection). See [docs/PROTOCOL.md](docs/PROTOCOL.md).
-  - First-party Google `SAPISIDHASH` / `SAPISID1PHASH` / `SAPISID3PHASH` signing with per-account isolation.
-- **Multi-Account × Multi-Device Aggregation**:
+  - First-party Google `SAPISIDHASH` / `SAPISID1PHASH` / `SAPISID3PHASH` signing with per-account isolation, TCP/HTTP2 keep-alive + retry backoff for transient network errors, and automatic 401 cookie self-heal from the live WebKit cookie store.
+- **Multi-Account × Multi-Device Aggregation & Instant Switching**:
   - Concurrently fans out across **all enabled Antigravity accounts × all online/idle machines** into one unified chronological feed (just like Claude Code native client), with instant toggles for **Unified / By Account / By Device** views.
-- **1:1 Claude App Mobile UX & Touch Ergonomics**:
-  - Warm alabaster (light) & warm obsidian (dark) editorial palette, left-edge swipe-right drawer, swipe-down `<dialog>` bottom sheets, auto-collapsed read-only tool pills (`Used N tools`), collapsible thinking traces, inline Diff & Terminal cards, interactive `AskUserQuestion` cards, `/` Slash Command autocomplete palette, image/file attachments + full-screen lightbox, and sandboxed HTML/SVG/Markdown Artifact preview (`Preview | Source`).
-  - Native Android IME inset support (`WindowInsetsCompat.Type.ime()`) + 3-part IME-safe Enter guard for Chinese/English/Japanese keyboards.
-  - Full internationalization (`Auto`, `English`, `简体中文`, `繁體中文`) tailored for Global, China, and Singapore users.
-- **Self-Hosted Cloud Sync Server (`server/`)**:
-  - Lightweight **Bun + TypeScript + `bun:sqlite` + Docker** sync backend (~14 KB bundled, zero external DB).
+  - Instant cold start and session switching via memory + `localStorage` trajectory cache, cold-start snapshots, stale-response/stream guards, and a Rust trajectory LRU cache.
+- **Adaptive Mobile & Desktop UX**:
+  - Warm alabaster (light) & warm obsidian (dark) editorial palette, persistent `280px` desktop sidebar, `⌘K` / `Ctrl+K` command palette, left-edge swipe-right drawer, swipe-down `<dialog>` bottom sheets, and full internationalization (`Auto`, `English`, `简体中文`, `繁體中文`).
+  - Mobile ergonomics: native Android IME inset support (`WindowInsetsCompat.Type.ime()`), 3-part IME-safe Enter guard, touch keyboard newline (`enterKeyHint="enter"`), layered system Back stack, Recents task persistence, and Android notification approve/deny actions.
+- **Rich Coding Workflow**:
+  - **2-Level Model + Thinking Picker & 5h/Weekly Quotas**: Family-grouped model selector with thinking effort sub-picker, auto-sync with the active remote model, and official 5-hour & weekly usage quota buckets.
+  - **Hunk-Based Diff Viewer & Full-Source Images**: Dual 1-based line numbers, collapsible unchanged context, hunk navigation, plus base64, HTTP(S), and workstation local `file://` image rendering (`ReadFile` proxy + LRU cache).
+  - **Multi-Item Pending Queue & Interactive Cards**: Queue, edit, reorder, or send-now while the agent is busy; auto-collapsed read-only tool pills (`Used N tools`), collapsible thinking traces, inline Terminal cards, interactive `AskUserQuestion` cards, `/` Slash Command autocomplete, and sandboxed HTML/SVG/Markdown Artifact preview (`Preview | Source`).
+- **Self-Hosted Cloud Sync Server & Web Portal (`server/`)**:
+  - Lightweight **Bun + TypeScript + `bun:sqlite` + Docker** sync backend + multi-platform download portal (zero external DB).
   - Reuses **Google OAuth SSO** (no extra password/registration system); stores only SSO user profile + **AES-256-GCM** encrypted `antigravity-vault/v1` cookie bundles for seamless PC ↔ Mobile synchronization.
-- **GitHub Releases Two-Tier Auto-Updater & Ultra-Small APK**:
-  - Automatic `Incremental Delta` (~120 KB web bundle) & `Full Native APK` (with streaming progress, SHA-256 verification, and Android `FileProvider` self-installer).
+- **Two-Tier Auto-Updater & Persistent Android Signing**:
+  - Automatic `Incremental Delta` (`~170 KB` web bundle) & `Full Native` installers (with streaming progress, SHA-256 verification, Android `FileProvider` self-installer, and persistent release keystore signing for in-place APK upgrades).
   - Rust release profile (`opt-level = "z"`, `lto = true`, `strip = "symbols"`) + Android R8 shrinking (`isMinifyEnabled = true`, `isShrinkResources = true`).
 
 > **Note on v1 Archive**: The previous Gemini + Antigravity dual-WebView fusion version (`v0.1.0`) is permanently preserved on the [`release/v1-webview-fusion`](../../tree/release/v1-webview-fusion) branch.
@@ -51,10 +61,14 @@
 
 ## Quick Start
 
+### 0. Pre-Built Installers
+Download signed releases for **Android, macOS (Apple Silicon), Windows, and Linux** from the [Web Portal](https://antigravity.yterm.cn/) or [GitHub Releases](https://github.com/HeiSir2014/antigravity-app/releases/latest).
+
 ### 1. App Development (Bun + Tauri v2)
 ```bash
 bun install
 bun run build
+bun run test
 cd src-tauri && cargo check
 
 # Launch Desktop app
