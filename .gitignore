@@ -24,3 +24,7 @@ src-tauri/gen/android/keystore.properties
 # Reverse-engineering scratch artifacts (not for commit)
 .reverse/
 .gstack/
+
+# Local private agent notes / deploy targets (not for commit)
+CLAUDE.local.md
+AGENTS.local.md

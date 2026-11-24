@@ -1,7 +1,12 @@
 import { decryptVaultText, encryptVaultText, signJwt, verifyJwt } from './crypto';
 import { getUserById, getVault, upsertUser, upsertVault } from './db';
 import { renderLegalPage, renderOAuthErrorPage, renderOAuthHandoffPage } from './pages';
-import { getLatestReleaseSummary, renderPortalPage } from './portal';
+import {
+  getCachedReleaseVersion,
+  getLatestReleaseSummary,
+  renderPortalPage,
+  startReleaseRefreshLoop,
+} from './portal';
 
 const PORT = Number(process.env.PORT || 8787);
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -204,6 +209,7 @@ const server = Bun.serve({
       return json({
         ok: true,
         service: 'antigravity-sync-server',
+        portalVersion: getCachedReleaseVersion(),
         oauthConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
       });
     }
@@ -483,4 +489,5 @@ const server = Bun.serve({
   },
 });
 
+startReleaseRefreshLoop();
 console.log(`Antigravity Sync Server listening on http://0.0.0.0:${server.port}`);

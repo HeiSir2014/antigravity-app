@@ -28,31 +28,35 @@ export interface ReleaseAssetSummary {
 }
 
 const DEFAULT_RELEASE: ReleaseAssetSummary = {
-  version: 'v2.0.0',
-  releaseUrl: 'https://github.com/HeiSir2014/antigravity-app/releases/tag/v2.0.0',
+  version: 'v2.1.2',
+  releaseUrl: 'https://github.com/HeiSir2014/antigravity-app/releases/tag/v2.1.2',
   androidApkUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/app-universal-release.apk',
-  androidApkSize: '24.5 MB (Universal)',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/app-universal-release.apk',
+  androidApkSize: '25.24 MB',
   macosDmgUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity_2.0.0_aarch64.dmg',
-  macosDmgSize: '2.58 MB',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity_2.1.2_aarch64.dmg',
+  macosDmgSize: '2.66 MB',
   windowsExeUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity_2.0.0_x64-setup.exe',
-  windowsExeSize: '1.82 MB',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity_2.1.2_x64-setup.exe',
+  windowsExeSize: '1.89 MB',
   windowsMsiUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity_2.0.0_x64_en-US.msi',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity_2.1.2_x64_en-US.msi',
   linuxDebUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity_2.0.0_amd64.deb',
-  linuxDebSize: '2.37 MB',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity_2.1.2_amd64.deb',
+  linuxDebSize: '2.47 MB',
   linuxAppImageUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity_2.0.0_amd64.AppImage',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity_2.1.2_amd64.AppImage',
   linuxRpmUrl:
-    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.0.0/Antigravity-2.0.0-1.x86_64.rpm',
-  webBundleSize: '140 KB',
+    'https://github.com/HeiSir2014/antigravity-app/releases/download/v2.1.2/Antigravity-2.1.2-1.x86_64.rpm',
+  webBundleSize: '171 KB',
 };
 
-let cachedRelease: { data: ReleaseAssetSummary; fetchedAt: number } | null = null;
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const RETRY_BACKOFF_MS = 30 * 1000;
+const FETCH_TIMEOUT_MS = 6000;
+
+let cachedRelease: { data: ReleaseAssetSummary; fetchedAt: number; ok: boolean } | null = null;
+let inFlightFetch: Promise<ReleaseAssetSummary> | null = null;
 
 function fmtMB(bytes: number | undefined, fallback: string): string {
   if (!bytes || bytes <= 0) return fallback;
@@ -60,18 +64,21 @@ function fmtMB(bytes: number | undefined, fallback: string): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export async function getLatestReleaseSummary(): Promise<ReleaseAssetSummary> {
-  if (cachedRelease && Date.now() - cachedRelease.fetchedAt < CACHE_TTL_MS) {
-    return cachedRelease.data;
-  }
+async function fetchLatestReleaseFromGitHub(): Promise<ReleaseAssetSummary> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2200);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'antigravity-portal/2.1',
+    };
+    const token = process.env.GITHUB_TOKEN?.trim();
+    if (token) headers.Authorization = `Bearer ${token}`;
+
     const resp = await fetch('https://api.github.com/repos/HeiSir2014/antigravity-app/releases/latest', {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'antigravity-portal/2.0' },
+      headers,
       signal: controller.signal,
     });
-    clearTimeout(timer);
     if (!resp.ok) throw new Error(`GitHub API ${resp.status}`);
     const json = (await resp.json()) as {
       tag_name?: string;
@@ -105,11 +112,49 @@ export async function getLatestReleaseSummary(): Promise<ReleaseAssetSummary> {
       linuxRpmUrl: rpm?.browser_download_url || DEFAULT_RELEASE.linuxRpmUrl,
       webBundleSize: fmtMB(bundle?.size, DEFAULT_RELEASE.webBundleSize),
     };
-    cachedRelease = { data: summary, fetchedAt: Date.now() };
+    cachedRelease = { data: summary, fetchedAt: Date.now(), ok: true };
     return summary;
   } catch {
-    cachedRelease = { data: DEFAULT_RELEASE, fetchedAt: Date.now() };
-    return DEFAULT_RELEASE;
+    const fallback = cachedRelease?.ok ? cachedRelease.data : DEFAULT_RELEASE;
+    cachedRelease = { data: fallback, fetchedAt: Date.now(), ok: false };
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+    inFlightFetch = null;
+  }
+}
+
+export async function getLatestReleaseSummary(forceRefresh = false): Promise<ReleaseAssetSummary> {
+  const now = Date.now();
+  if (!forceRefresh && cachedRelease) {
+    const ttl = cachedRelease.ok ? CACHE_TTL_MS : RETRY_BACKOFF_MS;
+    if (now - cachedRelease.fetchedAt < ttl) {
+      return cachedRelease.data;
+    }
+    if (cachedRelease.ok) {
+      if (!inFlightFetch) {
+        inFlightFetch = fetchLatestReleaseFromGitHub();
+      }
+      return cachedRelease.data;
+    }
+  }
+  if (!inFlightFetch) {
+    inFlightFetch = fetchLatestReleaseFromGitHub();
+  }
+  return inFlightFetch;
+}
+
+export function getCachedReleaseVersion(): string {
+  return cachedRelease?.data.version || DEFAULT_RELEASE.version;
+}
+
+export function startReleaseRefreshLoop(): void {
+  void getLatestReleaseSummary(true);
+  const timer = setInterval(() => {
+    void getLatestReleaseSummary(true);
+  }, CACHE_TTL_MS);
+  if (typeof timer === 'object' && 'unref' in timer) {
+    timer.unref();
   }
 }
 
@@ -267,24 +312,26 @@ export function renderPortalPage(opts: {
     },
     {
       badge: '04 · DELTA OTA',
-      title: zh ? '两级智能更新（140 KB 热更）' : 'Two-Tier Auto-Updater (140 KB Delta)',
+      title: zh
+        ? `两级智能更新（${release.webBundleSize} 热更）`
+        : `Two-Tier Auto-Updater (${release.webBundleSize} Delta)`,
       desc: zh
-        ? '界面与交互迭代仅需拉取 ~140 KB 增量包；原生内核升级自动校验 SHA-256 并流式下载最新安装包。'
-        : 'UI updates ship as ~140 KB incremental bundles; native upgrades download directly from GitHub Releases with SHA-256 verification.',
+        ? `界面与交互迭代仅需拉取 ~${release.webBundleSize} 增量包；原生内核升级自动校验 SHA-256 并流式下载最新安装包。`
+        : `UI updates ship as ~${release.webBundleSize} incremental bundles; native upgrades download directly from GitHub Releases with SHA-256 verification.`,
     },
     {
       badge: '05 · RICH PREVIEWS',
-      title: zh ? 'Diff、图表与 Artifact 全内置' : 'Native Diff, Charts & Artifact Previews',
+      title: zh ? 'Hunk Diff、多级模型配额与待发队列' : 'Hunk Diff, 2-Level Model Picker & Queue',
       desc: zh
-        ? '代码 Diff 审查、HTML/SVG 渲染、附件图片上传与灯箱、Slash 命令联想与 AskUserQuestion 审批一应俱全。'
-        : 'Built-in code diff viewer, HTML/SVG/Markdown artifacts, image attachments, slash palette & interactive AskUserQuestion cards.',
+        ? '代码 Hunk Diff 审查、远程工作站本地图片渲染、两级模型与思考强度切换、5 小时/每周配额条、多条消息待发队列与 AskUserQuestion 审批一应俱全。'
+        : 'Hunk-based code diff viewer, remote workstation image rendering, 2-level model & thinking effort picker, 5h/weekly quota bars, multi-item pending queue & AskUserQuestion cards.',
     },
     {
       badge: '06 · ULTRA LIGHT',
       title: zh ? '告别 Electron 臃肿，体积缩小 30×' : '30× Smaller Than Electron',
       desc: zh
-        ? '基于 Tauri v2 + Rust (opt-level="z" + LTO + strip symbols)，macOS 安装包仅 2.58 MB，Windows 仅 1.82 MB。'
-        : 'Built with Tauri v2 + Rust (opt-level="z", LTO, stripped symbols) — just 2.58 MB on macOS and 1.82 MB on Windows.',
+        ? `基于 Tauri v2 + Rust (opt-level="z" + LTO + strip symbols)，macOS 安装包仅 ${release.macosDmgSize}，Windows 仅 ${release.windowsExeSize}。`
+        : `Built with Tauri v2 + Rust (opt-level="z", LTO, stripped symbols) — just ${release.macosDmgSize} on macOS and ${release.windowsExeSize} on Windows.`,
     },
   ];
 
@@ -1168,7 +1215,7 @@ docker compose up -d --build`;
                 <span class="dl-os">Android</span>
                 <span class="dl-size">${escapeHtml(release.androidApkSize)}</span>
               </div>
-              <p class="dl-desc">${zh ? 'Android 8.0+ · 支持边缘手势、原生输入法避让与 140KB 增量热更' : 'Android 8.0+ · Native IME ergonomics & 140 KB delta updates'}</p>
+              <p class="dl-desc">${zh ? `Android 8.0+ · 支持边缘手势、原生输入法避让与 ${escapeHtml(release.webBundleSize)} 增量热更` : `Android 8.0+ · Native IME ergonomics & ${escapeHtml(release.webBundleSize)} delta updates`}</p>
             </div>
             <div class="dl-actions">
               <a class="btn btn-primary dl-btn" href="${escapeHtml(release.androidApkUrl)}">${zh ? '下载 APK 安装包' : 'Download APK'}</a>

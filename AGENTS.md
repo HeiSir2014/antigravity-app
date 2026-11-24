@@ -97,3 +97,17 @@ In `boq-jetski.GoogleAntigravity` (`m=_b`, `m=Mc2QKe`, `m=PGmR6b`):
 Both `antigravity.google.com` and `gemini.google.com` enforce `Content-Security-Policy: require-trusted-types-for 'script'`.
 - **Forbidden APIs in `src/inject/*`**: `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval`.
 - **Required Helpers**: Always use `el()`, `clearChildren()`, and `adoptStyleSheet()` from `src/inject/dom-safe.ts`.
+
+---
+
+## 5. Release & Web Portal Deployment Rule (`server/`)
+
+Whenever publishing a new app version (`vX.Y.Z`):
+1. **Update Portal Fallback & Highlights (`server/src/portal.ts`)**:
+   - Update `DEFAULT_RELEASE` to the newly published `vX.Y.Z` tag, download URLs, and exact asset sizes so the portal never falls back to a stale release if GitHub API is slow or rate-limited.
+   - Update feature highlights or screenshots in `server/public/screenshots/` whenever user-facing capabilities change.
+2. **Deploy Updated Portal (`server/`)**:
+   - Sync updated `server/` source and assets to the production portal host (`<portal-ssh-host>:~/antigravity-sync-server/`, preserving `.env` and the `sync-data` Docker volume) and run `docker compose up -d --build`.
+   - Keep concrete SSH hostnames/usernames out of git-tracked files (store local deploy targets in gitignored `CLAUDE.local.md` or `~/.ssh/config`).
+3. **Verify Live Portal**:
+   - Confirm `https://antigravity.yterm.cn/health` returns `"ok": true` and `"portalVersion": "vX.Y.Z"`, and that `https://antigravity.yterm.cn/` renders the `vX.Y.Z` version badge and download links.

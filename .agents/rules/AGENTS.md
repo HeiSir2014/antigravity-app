@@ -50,3 +50,9 @@ Both `https://antigravity.google.com`, `https://antigravity.static.usercontent.g
 - Always consult `modern-web-guidance` (`bunx modern-web-guidance@latest search "<query>"`) before introducing new UI components or CSS patterns.
 - Target modern Chromium (Android System WebView 124+ / Desktop WebView) and WKWebView (macOS 15+).
 - Use native `<dialog>` with `.showModal()`, `closedby="any"` (plus pointer light-dismiss fallback), `overscroll-behavior: contain`, `color-scheme: light dark`, `light-dark()`, `44px` minimum coarse-pointer touch targets, and the 3-part IME-safe Enter guard (`event.isComposing || event.keyCode === 229 || Math.abs(event.timeStamp - lastCompositionEndAt) < 50`).
+
+## 6. Release & Web Portal Sync (`server/`)
+- **Always update the web portal (`https://antigravity.yterm.cn/`) whenever publishing a new release (`vX.Y.Z`)**:
+  1. Update `DEFAULT_RELEASE` (version, URLs, asset sizes) and any changed highlights/screenshots in `server/src/portal.ts` & `server/public/screenshots/`.
+  2. Deploy `server/` to the portal host (`<portal-ssh-host>:~/antigravity-sync-server/`, preserving `.env` and `sync-data`) via `docker compose up -d --build`. Never commit private SSH hostnames/usernames into git-tracked files (use gitignored `CLAUDE.local.md` or `~/.ssh/config`).
+  3. Verify `https://antigravity.yterm.cn/health` reports `"portalVersion": "vX.Y.Z"` and the landing page links point to `vX.Y.Z`.

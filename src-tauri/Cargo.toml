@@ -1,6 +1,6 @@
 [package]
 name = "antigravity-app"
-version = "2.1.1"
+version = "2.1.2"
 description = "Pure-Native Antigravity Remote Control Tauri v2 App"
 authors = ["Antigravity Team"]
 edition = "2021"
