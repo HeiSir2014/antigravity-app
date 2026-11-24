@@ -325,13 +325,22 @@ export async function resolveRemoteImageSrc(
 
   try {
     const resp = await readRemoteFile(accountId, deviceUuid, uri);
-    const raw =
-      (typeof resp?.contents === 'string' && resp.contents) ||
+    let raw =
       (typeof resp?.content === 'string' && resp.content) ||
+      (typeof resp?.contents === 'string' && resp.contents) ||
       (typeof resp?.data === 'string' && resp.data) ||
       (typeof resp?.inlineData === 'string' && resp.inlineData) ||
       (typeof resp?.bytes === 'string' && resp.bytes) ||
       '';
+
+    if (!raw && Array.isArray(resp?.content)) {
+      const bytes = new Uint8Array(resp.content as number[]);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) {
+        bin += String.fromCharCode(bytes[i]);
+      }
+      raw = btoa(bin);
+    }
     if (!raw) return null;
 
     const mime =
@@ -345,7 +354,8 @@ export async function resolveRemoteImageSrc(
     } else if (mime === 'image/svg+xml' && raw.trim().startsWith('<')) {
       dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}`;
     } else {
-      dataUrl = `data:${mime};base64,${raw.replace(/\s+/g, '')}`;
+      const normalizedB64 = raw.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+      dataUrl = `data:${mime};base64,${normalizedB64}`;
     }
 
     remoteMediaCache.set(cacheKey, dataUrl);

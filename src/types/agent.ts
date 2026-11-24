@@ -79,6 +79,22 @@ export interface ModelQuotaItem {
   disabled: boolean;
 }
 
+export interface QuotaBucketSummary {
+  bucketId: string;
+  displayName: string;
+  description?: string | null;
+  remainingFraction?: number | null;
+  resetTimeIso?: string | null;
+  resetTimeMs?: number | null;
+  disabled: boolean;
+}
+
+export interface QuotaGroupSummary {
+  displayName: string;
+  description?: string | null;
+  buckets: QuotaBucketSummary[];
+}
+
 export interface AccountQuotaSnapshot {
   accountId: string;
   accountLabel: string;
@@ -92,6 +108,8 @@ export interface AccountQuotaSnapshot {
   weeklyRemainingFraction?: number | null;
   weeklyResetTimeIso?: string | null;
   weeklyResetTimeMs?: number | null;
+  quotaDescription?: string | null;
+  quotaGroups?: QuotaGroupSummary[];
   onlineDevices: number;
   totalDevices: number;
   sourceDeviceName?: string | null;

@@ -1724,6 +1724,8 @@ export function App() {
 
       <BottomSheet
         sheet={sheet}
+        activeAccountId={activeSession?.accountId}
+        activeDeviceUuid={activeSession?.deviceUuid}
         accounts={accounts}
         demoMode={demoMode}
         syncStatus={syncStatus}

@@ -43,6 +43,7 @@ export function SmartImage({
   const [resolvedSrc, setResolvedSrc] = useState(initialDirect);
   const [loading, setLoading] = useState(Boolean(filePathToFetch));
   const [failed, setFailed] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
     setFailed(false);
@@ -73,7 +74,7 @@ export function SmartImage({
     return () => {
       cancelled = true;
     };
-  }, [initialDirect, filePathToFetch, accountId, deviceUuid, mimeType]);
+  }, [initialDirect, filePathToFetch, accountId, deviceUuid, mimeType, retryToken]);
 
   if (loading) {
     return (
@@ -88,8 +89,12 @@ export function SmartImage({
 
   if (failed || !resolvedSrc) {
     return (
-      <div
-        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-[0.72rem] font-mono max-w-[200px]"
+      <button
+        type="button"
+        onClick={() => {
+          if (filePathToFetch) setRetryToken((n) => n + 1);
+        }}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-[0.72rem] font-mono max-w-[220px] cursor-pointer active:opacity-75"
         style={{
           background: 'var(--bg-surface)',
           borderColor: 'var(--border-subtle)',
@@ -99,7 +104,7 @@ export function SmartImage({
       >
         <ImageOff className="w-3.5 h-3.5 shrink-0" />
         <span className="truncate">{alt || 'Image'}</span>
-      </div>
+      </button>
     );
   }
 

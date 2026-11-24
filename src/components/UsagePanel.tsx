@@ -255,7 +255,93 @@ function AccountUsage({
         </div>
       )}
 
-      {typeof item.weeklyRemainingFraction === 'number' && (
+      {item.quotaGroups && item.quotaGroups.length > 0 && (
+        <div className="space-y-3">
+          {item.quotaDescription && (
+            <p className="text-[0.74rem]" style={{ color: 'var(--text-muted)' }}>
+              {item.quotaDescription}
+            </p>
+          )}
+          {item.quotaGroups.map((group, gIdx) => (
+            <div
+              key={`${group.displayName}-${gIdx}`}
+              className="rounded-xl border p-3 space-y-2.5"
+              style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-elevated)' }}
+            >
+              <div className="space-y-0.5">
+                <div className="text-[0.82rem] font-semibold">{group.displayName}</div>
+                {group.description && (
+                  <div className="text-[0.72rem]" style={{ color: 'var(--text-muted)' }}>
+                    {group.description}
+                  </div>
+                )}
+              </div>
+              {group.buckets.length > 0 && (
+                <div className="space-y-2.5">
+                  {group.buckets.map((bucket) => {
+                    const hasFrac = typeof bucket.remainingFraction === 'number';
+                    const frac = hasFrac
+                      ? Math.max(0, Math.min(1, bucket.remainingFraction!))
+                      : 1;
+                    const pct = Math.round(frac * 100);
+                    const reset = formatResetCountdown(bucket.resetTimeMs);
+                    return (
+                      <div
+                        key={bucket.bucketId}
+                        className={`space-y-1.5 pt-2 first:pt-0 border-t first:border-t-0 ${
+                          bucket.disabled ? 'opacity-50' : ''
+                        }`}
+                        style={{ borderColor: 'var(--border-subtle)' }}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[0.78rem] font-medium truncate">
+                            {bucket.displayName}
+                          </span>
+                          <span
+                            className="text-[0.74rem] font-mono font-semibold shrink-0"
+                            style={{ color: hasFrac ? quotaColor(frac) : 'var(--text-secondary)' }}
+                          >
+                            {hasFrac ? (pct <= 0 ? t('quotaExhaustedBadge') : `${pct}%`) : '—'}
+                          </span>
+                        </div>
+                        {hasFrac && (
+                          <div
+                            className="h-1.5 rounded-full overflow-hidden"
+                            style={{ background: 'var(--border-subtle)' }}
+                          >
+                            <div
+                              className="h-full rounded-full transition-all"
+                              style={{
+                                width: `${Math.max(pct, 1)}%`,
+                                background: quotaColor(frac),
+                              }}
+                            />
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-2 flex-wrap text-[0.68rem]" style={{ color: 'var(--text-muted)' }}>
+                          {reset ? (
+                            <span className="inline-flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {t('quotaResetIn', { time: reset })}
+                            </span>
+                          ) : (
+                            <span />
+                          )}
+                          {bucket.description && (
+                            <span className="truncate">{bucket.description}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(!item.quotaGroups || item.quotaGroups.length === 0) && typeof item.weeklyRemainingFraction === 'number' && (
         <div
           className="rounded-xl border px-3 py-2.5 space-y-1.5"
           style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-elevated)' }}

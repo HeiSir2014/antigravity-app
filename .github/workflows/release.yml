@@ -174,7 +174,7 @@ jobs:
             const base = `https://github.com/${process.env.REPO}/releases/download/${process.env.TAG}`;
             const manifest = {
               version: process.env.VERSION,
-              minNativeVersion: "2.0.0",
+              minNativeVersion: "2.1.1",
               notes: `Antigravity Native ${process.env.TAG} release`,
               pubDate: process.env.PUB_DATE,
               webBundle: {

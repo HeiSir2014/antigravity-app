@@ -1,7 +1,7 @@
 {
   "name": "antigravity-app",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Pure-Native Antigravity Remote Control Tauri v2 App with Claude Mobile Agent UI",
   "type": "module",
   "scripts": {

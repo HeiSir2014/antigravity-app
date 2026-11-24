@@ -55,6 +55,26 @@ pub struct ModelQuotaItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QuotaBucketSummary {
+    pub bucket_id: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub remaining_fraction: Option<f64>,
+    pub reset_time_iso: Option<String>,
+    pub reset_time_ms: Option<u64>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaGroupSummary {
+    pub display_name: String,
+    pub description: Option<String>,
+    pub buckets: Vec<QuotaBucketSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountQuotaSnapshot {
     pub account_id: String,
     pub account_label: String,
@@ -68,6 +88,8 @@ pub struct AccountQuotaSnapshot {
     pub weekly_remaining_fraction: Option<f64>,
     pub weekly_reset_time_iso: Option<String>,
     pub weekly_reset_time_ms: Option<u64>,
+    pub quota_description: Option<String>,
+    pub quota_groups: Vec<QuotaGroupSummary>,
     pub online_devices: usize,
     pub total_devices: usize,
     pub source_device_name: Option<String>,
@@ -253,6 +275,20 @@ fn build_send_user_message_body(
         }
     }
     body
+}
+
+fn encode_file_uri_path(uri: &str) -> String {
+    let mut out = String::with_capacity(uri.len());
+    for &b in uri.as_bytes() {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b':' | b'-' | b'_' | b'.' | b'~' | b'%');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 fn is_read_only_rpc_method(method_name: &str) -> bool {
@@ -1136,6 +1172,8 @@ impl AntigravityClient {
                         weekly_remaining_fraction: None,
                         weekly_reset_time_iso: None,
                         weekly_reset_time_ms: None,
+                        quota_description: None,
+                        quota_groups: Vec::new(),
                         online_devices: 0,
                         total_devices: 0,
                         source_device_name: None,
@@ -1168,6 +1206,8 @@ impl AntigravityClient {
                     weekly_remaining_fraction: None,
                     weekly_reset_time_iso: None,
                     weekly_reset_time_ms: None,
+                    quota_description: None,
+                    quota_groups: Vec::new(),
                     online_devices: 0,
                     total_devices,
                     source_device_name: None,
@@ -1196,7 +1236,7 @@ impl AntigravityClient {
                 &account,
                 &primary_dev.uuid,
                 "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
-                json!({}),
+                json!({ "forceRefresh": true }),
             );
             let (user_res, models_res, quota_summary_res) =
                 tokio::join!(user_fut, models_fut, quota_summary_fut);
@@ -1211,6 +1251,8 @@ impl AntigravityClient {
             let mut weekly_remaining_fraction: Option<f64> = None;
             let mut weekly_reset_time_iso: Option<String> = None;
             let mut weekly_reset_time_ms: Option<u64> = None;
+            let mut quota_description: Option<String> = None;
+            let mut quota_groups: Vec<QuotaGroupSummary> = Vec::new();
             let mut models: Vec<ModelQuotaItem> = Vec::new();
             let mut err_code: Option<String> = None;
             let mut err_msg: Option<String> = None;
@@ -1284,6 +1326,9 @@ impl AntigravityClient {
             }
 
             if let Ok(ref sval) = quota_summary_res {
+                let (desc, groups) = parse_user_quota_summary(sval);
+                quota_description = desc;
+                quota_groups = groups;
                 let (w_frac, w_iso, w_ms) = extract_weekly_quota_from_value(sval);
                 if w_frac.is_some() {
                     weekly_remaining_fraction = w_frac;
@@ -1315,6 +1360,8 @@ impl AntigravityClient {
                 weekly_remaining_fraction,
                 weekly_reset_time_iso,
                 weekly_reset_time_ms,
+                quota_description,
+                quota_groups,
                 online_devices,
                 total_devices,
                 source_device_name: Some(primary_dev.display_name.clone()),
@@ -1532,20 +1579,50 @@ impl AntigravityClient {
         device_uuid: &str,
         uri: &str,
     ) -> Result<Value, String> {
-        let normalized_uri = if uri.starts_with("file://") {
-            uri.to_string()
-        } else if uri.starts_with('/') {
-            format!("file://{uri}")
+        let trimmed = uri.trim();
+        let normalized_uri = if trimmed.starts_with("file://") {
+            trimmed.to_string()
+        } else if trimmed.starts_with('/') {
+            format!("file://{trimmed}")
+        } else if trimmed.len() >= 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && (trimmed.as_bytes()[2] == b'\\' || trimmed.as_bytes()[2] == b'/')
+        {
+            format!("file:///{}", trimmed.replace('\\', "/"))
         } else {
-            uri.to_string()
+            trimmed.to_string()
         };
-        self.proxy_unary_json(
-            account_id,
-            device_uuid,
-            "/exa.language_server_pb.LanguageServerService/ReadFile",
-            json!({ "uri": normalized_uri }),
-        )
-        .await
+
+        let first = self
+            .proxy_unary_json(
+                account_id,
+                device_uuid,
+                "/exa.language_server_pb.LanguageServerService/ReadFile",
+                json!({ "uri": normalized_uri }),
+            )
+            .await;
+
+        if first.is_ok() {
+            return first;
+        }
+
+        // Retry with percent-encoded URI if the raw path contained spaces or non-ASCII characters.
+        let encoded = encode_file_uri_path(&normalized_uri);
+        if encoded != normalized_uri {
+            if let Ok(val) = self
+                .proxy_unary_json(
+                    account_id,
+                    device_uuid,
+                    "/exa.language_server_pb.LanguageServerService/ReadFile",
+                    json!({ "uri": encoded }),
+                )
+                .await
+            {
+                return Ok(val);
+            }
+        }
+        first
     }
 
     pub async fn send_all_queued_messages(
@@ -1819,6 +1896,94 @@ fn classify_account_error(err: &str) -> &'static str {
     } else {
         "API_ERROR"
     }
+}
+
+/// Parses official `RetrieveUserQuotaSummaryResponse`:
+/// `{ response: { description?: string, groups: [{ displayName, description, buckets: [{ bucketId, displayName, description, remainingFraction, resetTime, disabled }] }] } }`
+fn parse_user_quota_summary(val: &Value) -> (Option<String>, Vec<QuotaGroupSummary>) {
+    let root = val.get("response").unwrap_or(val);
+    let description = root
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    let mut groups = Vec::new();
+    if let Some(raw_groups) = root.get("groups").and_then(|v| v.as_array()) {
+        for (g_idx, g) in raw_groups.iter().enumerate() {
+            let display_name = g
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let g_desc = g
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let mut buckets = Vec::new();
+            if let Some(raw_buckets) = g.get("buckets").and_then(|v| v.as_array()) {
+                for (b_idx, b) in raw_buckets.iter().enumerate() {
+                    let b_name = b
+                        .get("displayName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if b_name.is_empty() {
+                        continue;
+                    }
+                    let bucket_id = b
+                        .get("bucketId")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("bucket-{g_idx}-{b_idx}"));
+                    let b_desc = b
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.to_string());
+                    let remaining_fraction = b
+                        .get("remainingFraction")
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            b.get("remaining")
+                                .and_then(|r| r.get("remainingFraction").or_else(|| r.get("value")))
+                                .and_then(|v| v.as_f64())
+                        });
+                    let reset_val = b.get("resetTime");
+                    let reset_time_iso = reset_val.and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let reset_time_ms = {
+                        let ms = parse_proto_timestamp_ms(reset_val);
+                        if ms > 0 { Some(ms) } else { None }
+                    };
+                    let disabled = b.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    buckets.push(QuotaBucketSummary {
+                        bucket_id,
+                        display_name: b_name,
+                        description: b_desc,
+                        remaining_fraction,
+                        reset_time_iso,
+                        reset_time_ms,
+                        disabled,
+                    });
+                }
+            }
+            if !display_name.is_empty() || !buckets.is_empty() || g_desc.is_some() {
+                groups.push(QuotaGroupSummary {
+                    display_name: if display_name.is_empty() {
+                        format!("Quota Group {}", g_idx + 1)
+                    } else {
+                        display_name
+                    },
+                    description: g_desc,
+                    buckets,
+                });
+            }
+        }
+    }
+    (description, groups)
 }
 
 fn extract_weekly_quota_from_value(val: &Value) -> (Option<f64>, Option<String>, Option<u64>) {
@@ -2430,5 +2595,45 @@ mod tests {
         assert!(!is_read_only_rpc_method("SendUserCascadeMessage"));
         assert!(!is_read_only_rpc_method("StartCascade"));
         assert!(!is_read_only_rpc_method("CancelCascadeInvocation"));
+    }
+
+    #[test]
+    fn parses_retrieve_user_quota_summary_groups_and_buckets() {
+        let raw = json!({
+            "response": {
+                "description": "Shared across Antigravity models",
+                "groups": [
+                    {
+                        "displayName": "Gemini & Claude",
+                        "description": "Rolling and weekly limits",
+                        "buckets": [
+                            {
+                                "bucketId": "5h-rolling",
+                                "displayName": "5-hour window",
+                                "remainingFraction": 0.82,
+                                "resetTime": "2026-11-24T05:00:00Z",
+                                "description": "Resets every 5 hours"
+                            },
+                            {
+                                "bucketId": "weekly",
+                                "displayName": "Weekly limit",
+                                "remainingFraction": 0.61,
+                                "resetTime": "2026-11-30T00:00:00Z",
+                                "description": "Resets weekly"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let (desc, groups) = parse_user_quota_summary(&raw);
+        assert_eq!(desc.as_deref(), Some("Shared across Antigravity models"));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].buckets.len(), 2);
+        assert_eq!(groups[0].buckets[0].display_name, "5-hour window");
+        assert_eq!(groups[0].buckets[0].remaining_fraction, Some(0.82));
+        assert_eq!(groups[0].buckets[1].display_name, "Weekly limit");
+        assert_eq!(groups[0].buckets[1].remaining_fraction, Some(0.61));
+        assert!(groups[0].buckets[1].reset_time_ms.is_some());
     }
 }

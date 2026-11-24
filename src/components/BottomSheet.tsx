@@ -62,6 +62,8 @@ type SettingsSubPage =
 
 interface BottomSheetProps {
   sheet: SheetDestination | null;
+  activeAccountId?: string;
+  activeDeviceUuid?: string;
   accounts: AccountSummary[];
   demoMode: boolean;
   syncStatus: SyncStatusInfo;
@@ -324,6 +326,8 @@ function DiffLines({ diff }: { diff: string }) {
 
 export function BottomSheet({
   sheet,
+  activeAccountId,
+  activeDeviceUuid,
   accounts,
   demoMode,
   syncStatus,
@@ -625,7 +629,11 @@ export function BottomSheet({
                       className="rounded-2xl px-3.5 py-2.5 text-[0.82rem] leading-relaxed"
                       style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface)' }}
                     >
-                      <MarkdownView markdown={item.markdown} />
+                      <MarkdownView
+                        markdown={item.markdown}
+                        accountId={sheet.subagent.accountId}
+                        deviceUuid={sheet.subagent.deviceUuid}
+                      />
                     </div>
                   );
                 }
@@ -969,7 +977,11 @@ export function BottomSheet({
                   style={{ borderColor: 'var(--border-subtle)' }}
                 />
               ) : (
-                <MarkdownView markdown={sheet.markdown} />
+                <MarkdownView
+                  markdown={sheet.markdown}
+                  accountId={activeAccountId}
+                  deviceUuid={activeDeviceUuid}
+                />
               )}
             </>
           )}
