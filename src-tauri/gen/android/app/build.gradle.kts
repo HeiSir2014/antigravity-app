@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -14,6 +15,38 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
+val releaseKeystorePath: String? =
+    System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty("storeFile")?.takeIf { it.isNotBlank() }
+val releaseKeystoreFile = releaseKeystorePath?.let { path ->
+    val f = File(path)
+    if (f.isAbsolute) f else rootProject.file(path)
+}
+val releaseStorePassword: String? =
+    System.getenv("ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty("storePassword")?.takeIf { it.isNotBlank() }
+val releaseKeyAlias: String? =
+    System.getenv("ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty("keyAlias")?.takeIf { it.isNotBlank() }
+val releaseKeyPassword: String? =
+    System.getenv("ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty("keyPassword")?.takeIf { it.isNotBlank() }
+        ?: releaseStorePassword
+
+val hasReleaseSigning =
+    releaseKeystoreFile != null &&
+        releaseKeystoreFile.exists() &&
+        !releaseStorePassword.isNullOrBlank() &&
+        !releaseKeyAlias.isNullOrBlank() &&
+        !releaseKeyPassword.isNullOrBlank()
+
 android {
     compileSdk = 36
     namespace = "com.google.antigravity.remoteapp"
@@ -24,6 +57,19 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,7 +85,14 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "ANDROID_KEYSTORE_PATH / keystore.properties not configured; falling back to debug signing."
+                )
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             optimization {
